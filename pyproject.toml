@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Coding AI Agent built on DeepAgents with long-term memory, dynamic sub-agents, and model fallback"
 requires-python = ">=3.11"
 dependencies = [
+    # DeepAgents core (required)
+    "deepagents @ git+https://github.com/langchain-ai/deepagents.git#subdirectory=libs/deepagents",
     "langgraph>=0.4.0",
     "langchain-core>=0.3.0",
     "langchain-openai>=0.3.0",
@@ -20,11 +22,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
-]
-
-[project.optional-dependencies]
-deepagents = [
-    "deepagents @ git+https://github.com/langchain-ai/deepagents.git#subdirectory=libs/deepagents",
 ]
 
 [project.scripts]

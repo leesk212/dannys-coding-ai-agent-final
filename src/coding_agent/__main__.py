@@ -182,7 +182,8 @@ def main() -> None:
     print_banner()
 
     try:
-        components = create_coding_agent()
+        from pathlib import Path
+        components = create_coding_agent(cwd=Path.cwd())
     except Exception as e:
         console.print(f"[red]Failed to initialize agent: {e}[/red]")
         sys.exit(1)

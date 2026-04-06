@@ -25,6 +25,8 @@ from langchain.agents.middleware.types import (
 from langchain.tools import ToolRuntime
 from pydantic import BaseModel, Field
 
+from deepagents.middleware._utils import append_to_system_message
+
 from coding_agent.memory.categories import MemoryCategory
 from coding_agent.memory.store import LongTermMemory
 
@@ -148,13 +150,7 @@ class LongTermMemoryMiddleware(AgentMiddleware[LongTermMemoryState, ContextT, Re
         """Inject relevant memories into the system prompt."""
         memories = request.state.get("ltm_relevant_memories", [])
         memory_text = self._format_memories(memories)
-
-        current_system = request.system_message or ""
-        if isinstance(current_system, str):
-            new_system = current_system + "\n\n" + memory_text
-        else:
-            new_system = str(current_system) + "\n\n" + memory_text
-
+        new_system = append_to_system_message(request.system_message, memory_text)
         return request.override(system_message=new_system)
 
     def wrap_model_call(

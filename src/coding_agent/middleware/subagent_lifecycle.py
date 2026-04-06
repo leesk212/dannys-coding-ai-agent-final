@@ -29,6 +29,7 @@ from langchain.agents.middleware.types import (
     PrivateStateAttr,
     ResponseT,
 )
+from deepagents.middleware._utils import append_to_system_message
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -293,13 +294,8 @@ class SubAgentLifecycleMiddleware(AgentMiddleware[SubAgentLifecycleState, Contex
         if summary == "(no active sub-agents)":
             return request
 
-        injection = f"\n\n<active_subagents>\n{summary}\n</active_subagents>"
-        current_system = request.system_message or ""
-        if isinstance(current_system, str):
-            new_system = current_system + injection
-        else:
-            new_system = str(current_system) + injection
-
+        injection = f"<active_subagents>\n{summary}\n</active_subagents>"
+        new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
 
     def _execute_subagent(self, task: SubAgentTask) -> str:
