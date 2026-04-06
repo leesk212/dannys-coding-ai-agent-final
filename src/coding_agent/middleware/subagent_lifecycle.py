@@ -124,6 +124,28 @@ class SubAgentTask:
 
 # ── SubAgent Registry ──────────────────────────────────────────────────
 
+@dataclass
+class SubAgentEvent:
+    """An event in the sub-agent lifecycle, used by the WebUI to render updates."""
+
+    timestamp: float
+    task_id: str
+    agent_type: str
+    event_type: str  # "spawned", "started", "completed", "failed"
+    description: str
+    result: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "timestamp": self.timestamp,
+            "task_id": self.task_id,
+            "agent_type": self.agent_type,
+            "event_type": self.event_type,
+            "description": self.description,
+            "result": self.result,
+        }
+
+
 class SubAgentRegistry:
     """Registry for tracking active sub-agents and their lifecycle."""
 
@@ -131,6 +153,17 @@ class SubAgentRegistry:
         self.tasks: dict[str, SubAgentTask] = {}
         self.history: list[SubAgentTask] = []  # completed/failed tasks
         self.max_concurrent = max_concurrent
+        self.events: list[SubAgentEvent] = []  # timeline for UI rendering
+
+    def _emit(self, task: SubAgentTask, event_type: str, result: str | None = None) -> None:
+        self.events.append(SubAgentEvent(
+            timestamp=time.time(),
+            task_id=task.id,
+            agent_type=task.agent_type,
+            event_type=event_type,
+            description=task.task_description,
+            result=result,
+        ))
 
     def spawn(self, description: str, agent_type: str = "general") -> SubAgentTask:
         """Create and register a new sub-agent task."""
@@ -149,11 +182,14 @@ class SubAgentRegistry:
 
         task = SubAgentTask.create(description, agent_type)
         self.tasks[task.id] = task
+        self._emit(task, "spawned")
         logger.info("Spawned sub-agent [%s] type=%s: %s", task.id, agent_type, description[:80])
         return task
 
     def start(self, task_id: str) -> None:
-        self.tasks[task_id].status = SubAgentStatus.RUNNING
+        task = self.tasks[task_id]
+        task.status = SubAgentStatus.RUNNING
+        self._emit(task, "started")
 
     def complete(self, task_id: str, result: str, model_used: str | None = None) -> None:
         task = self.tasks[task_id]
@@ -161,6 +197,7 @@ class SubAgentRegistry:
         task.result = result
         task.model_used = model_used
         task.completed_at = time.time()
+        self._emit(task, "completed", result[:200] if result else None)
         logger.info("Sub-agent [%s] completed in %.1fs", task_id, task.completed_at - task.created_at)
 
     def fail(self, task_id: str, error: str) -> None:
@@ -168,6 +205,7 @@ class SubAgentRegistry:
         task.status = SubAgentStatus.FAILED
         task.error = error
         task.completed_at = time.time()
+        self._emit(task, "failed", error)
         logger.warning("Sub-agent [%s] failed: %s", task_id, error)
 
     def cleanup(self) -> list[SubAgentTask]:
@@ -197,6 +235,13 @@ class SubAgentRegistry:
         all_tasks = list(self.tasks.values()) + self.history
         all_tasks.sort(key=lambda t: t.created_at, reverse=True)
         return [t.to_dict() for t in all_tasks]
+
+    def get_events_since(self, since: float = 0) -> list[dict]:
+        """Get events since a timestamp (for incremental UI updates)."""
+        return [e.to_dict() for e in self.events if e.timestamp > since]
+
+    def clear_events(self) -> None:
+        self.events.clear()
 
 
 # ── Tool schemas ───────────────────────────────────────────────────────

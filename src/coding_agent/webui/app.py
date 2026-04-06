@@ -22,6 +22,8 @@ def init_session_state() -> None:
         st.session_state.chat_messages = []
     if "initialized" not in st.session_state:
         st.session_state.initialized = False
+    if "subagent_panel_visible" not in st.session_state:
+        st.session_state.subagent_panel_visible = False
 
 
 def init_agent() -> None:
@@ -43,7 +45,8 @@ def main() -> None:
     init_session_state()
 
     # Sidebar navigation
-    st.sidebar.title("Coding AI Agent")
+    st.sidebar.title("🤖 Coding AI Agent")
+    st.sidebar.caption("DeepAgents + Memory + SubAgents + Fallback")
     st.sidebar.markdown("---")
 
     page = st.sidebar.radio(
@@ -57,13 +60,18 @@ def main() -> None:
         components = st.session_state.agent_components
         if components:
             fallback = components["fallback_middleware"]
-            model = fallback.current_model or "not yet used"
-            st.sidebar.success(f"Connected: {model}")
+            model = fallback.current_model or "ready"
+            st.sidebar.success(f"Model: {model}")
 
             memory = components["memory_middleware"]
             stats = memory.store.get_stats()
             total = sum(stats.values())
             st.sidebar.info(f"Memory: {total} entries")
+
+            sa = components["subagent_middleware"]
+            task_count = len(sa.registry.get_all_tasks())
+            if task_count:
+                st.sidebar.info(f"SubAgent tasks: {task_count}")
     else:
         st.sidebar.warning("Agent not initialized")
 
