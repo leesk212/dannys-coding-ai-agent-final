@@ -195,54 +195,37 @@ def main():
     if not st.session_state.initialized:
         st.stop()
 
-    # ── Settings 버튼: 좌측 하단 고정 (사이드바 없이) ─────────────────
-    # Streamlit은 HTML div로 버튼을 감쌀 수 없으므로,
-    # 버튼을 먼저 렌더링한 뒤 JS로 찾아서 fixed 위치로 이동시킨다.
-    if st.button("⚙️ Settings", key="nav_settings"):
-        if st.session_state.page != "settings":
-            st.session_state.page = "settings"
-            st.rerun()
-        else:
-            st.session_state.page = "chat"
-            st.rerun()
-
-    st.markdown(
-        """<style>
-        [data-testid="stSidebar"] {display:none !important;}
-        </style>
-        <script>
-        (function() {
-            function moveBtn() {
-                const btns = window.parent.document.querySelectorAll('button[kind="secondary"]');
-                for (const btn of btns) {
-                    if (btn.textContent.includes('Settings')) {
-                        const wrapper = btn.closest('[data-testid="stVerticalBlock"]')
-                            ? btn.closest('[data-testid="element-container"]') || btn.parentElement
-                            : btn.parentElement;
-                        wrapper.style.cssText =
-                            'position:fixed !important; bottom:1.2rem; left:1.2rem; z-index:9999; width:auto;';
-                        btn.style.cssText =
-                            'background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; ' +
-                            'padding:0.4rem 1rem; font-size:0.85rem; cursor:pointer; color:#475569;';
-                        return;
-                    }
-                }
-                setTimeout(moveBtn, 200);
-            }
-            moveBtn();
-        })();
-        </script>""",
-        unsafe_allow_html=True,
-    )
+    # ── query_params 로 페이지 전환 감지 ─────────────────────────────
+    qp = st.query_params
+    if qp.get("page") == "settings" and st.session_state.page != "settings":
+        st.session_state.page = "settings"
+    elif qp.get("page") == "chat" and st.session_state.page != "chat":
+        st.session_state.page = "chat"
 
     # ── Page routing ─────────────────────────────────────────────────
     page = st.session_state.page
     if page == "settings":
         from coding_agent.webui._pages.settings import render_settings
         render_settings()
+        # Settings 페이지 하단에 Chat 복귀 링크
+        st.markdown(
+            '<a href="?page=chat" target="_self" '
+            'style="position:fixed;bottom:1rem;left:1.2rem;'
+            'font-size:0.85rem;color:#64748b;text-decoration:none;z-index:9999;">'
+            '💬 Back to Chat</a>',
+            unsafe_allow_html=True,
+        )
     else:
         from coding_agent.webui._pages.chat import render_chat
         render_chat()
+        # Chat 페이지 좌측 하단에 Settings 링크
+        st.markdown(
+            '<a href="?page=settings" target="_self" '
+            'style="position:fixed;bottom:1rem;left:1.2rem;'
+            'font-size:0.85rem;color:#64748b;text-decoration:none;z-index:9999;">'
+            '⚙️ Settings</a>',
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":
