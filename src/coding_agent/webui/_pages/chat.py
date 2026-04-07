@@ -205,10 +205,17 @@ def _build_mermaid(
         s = _STATUS_STYLE.get(a["status"], _STATUS_STYLE["pending"])
         lines.append(f"    style S{i} {s}")
 
-    # Build tooltip map: node_id → description
-    tooltips: dict[str, str] = {"U": "User", "M": m_detail}
+    # Build tooltip map: truncated edge-label text → full text
+    # JS looks up edge labels by their displayed text, not node IDs
+    tooltips: dict[str, str] = {}
+    if prompt_text:
+        safe_p = _esc(prompt_text[:20])
+        if len(prompt_text) > 20:
+            safe_p += "…"
+            tooltips[safe_p] = prompt_text
     for i, a in enumerate(agents):
-        tooltips[f"S{i}"] = f"{a['type']}: {a['status']}"
+        if a.get("result_summary"):
+            tooltips["done"] = a["result_summary"][:200]
 
     return "\n".join(lines), tooltips
 
