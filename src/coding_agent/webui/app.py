@@ -197,26 +197,10 @@ def main():
     if not st.session_state.initialized:
         st.stop()
 
-    # ── Sidebar: navigation only ─────────────────────────────────────
+    # ── Sidebar: Settings 버튼만 좌측 하단 고정 ──────────────────────
     with st.sidebar:
-        st.markdown("### Danny's Coding AI Agent")
-        st.markdown("---")
-
-        comp = st.session_state.agent_components
-        st.success(f"Model: {comp['fallback_middleware'].current_model or 'ready'}")
-        st.info(f"Memory: {st.session_state.mem_count} entries")
-        st.markdown("---")
-
-        # Chat 버튼
-        btn_type = "primary" if st.session_state.page == "chat" else "secondary"
-        if st.button("💬 Chat", use_container_width=True, type=btn_type, key="nav_chat"):
-            if st.session_state.page != "chat":
-                st.session_state.page = "chat"
-                st.rerun()
-
-        # Settings 버튼 — 하단 고정
         st.markdown(
-            "<div style='position:fixed; bottom:1.5rem; width:inherit;'>",
+            "<div style='position:fixed; bottom:1.5rem; left:0; width:21rem; padding:0 1rem;'>",
             unsafe_allow_html=True,
         )
         btn_type = "primary" if st.session_state.page == "settings" else "secondary"
