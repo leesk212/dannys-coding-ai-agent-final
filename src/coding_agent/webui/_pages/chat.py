@@ -1,0 +1,1009 @@
+"""Chat page — Mermaid flowchart + Event Feed + Scrollable Result.
+
+Back-end generates Mermaid syntax → front-end renders it dynamically via CDN.
+
+Layout (top → bottom):
+┌──────────────────────────────────────────────────────────┐
+│  📝 질의 입력창 (text_area)  │ 🚀 Send │ 🔄 New Chat    │
+├──────────────────────────────────────────────────────────┤
+│  🔍 Agent 동작 분석                                       │
+│  ├─ 📊 Mermaid FlowChart  (graph LR)                     │
+│  └─ 📡 Event Feed                                        │
+├──────────────────────────────────────────────────────────┤
+│  💬 Result  (고정 높이 400px, 내부 스크롤)                 │
+├──────────────────────────────────────────────────────────┤
+│  📌 Prompt  (프리셋 프롬프트 버튼들)                       │
+└──────────────────────────────────────────────────────────┘
+"""
+
+import logging
+import time
+import traceback
+
+import streamlit as st
+from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger(__name__)
+
+AGENT_ICONS = {
+    "code_writer": "✍️", "researcher": "🔍", "reviewer": "📋",
+    "debugger": "🐛", "general": "🤖",
+}
+
+TEST_PROMPTS = {
+    "SubAgent Test": (
+        "Analyze the following task by spawning sub-agents: "
+        "1) A researcher to investigate best practices for Python error handling, "
+        "2) A code_writer to write an example implementation"
+    ),
+    "Memory Test": (
+        "Remember that I prefer Python type hints and Google-style docstrings. "
+        "Then search memory to confirm it was saved."
+    ),
+    "Multi-Agent Review": (
+        "I need you to: spawn a code_writer to create a fibonacci function, "
+        "then spawn a reviewer to review the code quality"
+    ),
+    "Fallback Test": "Write a simple hello world in Python",
+}
+
+
+# ─────────────────────────────────────────────────────────
+#  Mermaid helpers
+# ─────────────────────────────────────────────────────────
+
+def _esc(text: str) -> str:
+    """Sanitise *text* so it can be safely placed inside a Mermaid label
+    (both ``"node label"`` and ``|"edge label"|``).
+
+    Aggressively strips anything that could break Mermaid syntax.
+    Only allows basic alphanumeric, spaces, Korean, and safe punctuation.
+    """
+    import re
+    # First pass: basic replacements
+    t = (
+        text
+        .replace("\\", "")
+        .replace('"', "'")
+        .replace("\n", " ")
+        .replace("\r", "")
+        .replace("#", " ")
+        .replace(";", ",")
+        .replace("|", " ")
+        .replace("<", " ")
+        .replace(">", " ")
+        .replace("{", " ")
+        .replace("}", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+        .replace("[", " ")
+        .replace("]", " ")
+        .replace("`", "'")
+        .replace("$", " ")
+        .replace("&", "+")
+        .replace("~", " ")
+        .replace("=", " ")
+        .replace("--", " ")  # Mermaid edge syntax
+        .replace("->", " ")  # Mermaid edge syntax
+        .replace("=>", " ")  # Mermaid edge syntax
+        .replace(":", " ")   # Mermaid node description separator
+    )
+    # Collapse multiple spaces
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special chars (for Event Feed entries)."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+        .replace("\n", " ")
+        .replace("\r", "")
+    )
+
+
+def _build_mermaid(
+    agents: list[dict],
+    is_working: bool,
+    prompt_text: str = "",
+    has_result: bool = False,
+    model_name: str = "",
+) -> str:
+    """Return a clean Mermaid graph LR string.
+
+    ★ Edge labels use ONLY safe, hardcoded short text — never raw AI output.
+       AI 응답 내용은 말풍선에서 보여주므로 Mermaid에는 흐름만 표시.
+
+    Nodes:
+      U  = User  (stadium shape)
+      M  = Main Agent  (rectangle)
+      S0 … Sn = SubAgents  (rectangle, coloured by status)
+    """
+    lines = ["graph LR"]
+
+    # ── User ──────────────────────────────────────────────
+    lines.append('    U(["👤 User"])')
+
+    # ── Main Agent ────────────────────────────────────────
+    if has_result:
+        m_detail = "Done"
+        if model_name:
+            safe_model = _esc(model_name[:20])
+            m_detail += f" {safe_model}"
+    elif is_working:
+        m_detail = "Processing"
+    else:
+        m_detail = "Idle"
+    lines.append(f'    M["🧠 Main Agent<br/><small>{m_detail}</small>"]')
+
+    # ── User → Main edge (prompt은 짧은 요약만) ──────────
+    if prompt_text:
+        safe_p = _esc(prompt_text[:20])
+        if len(prompt_text) > 20:
+            safe_p += "…"
+        lines.append(f'    U -->|"{safe_p}"| M')
+    else:
+        lines.append("    U --> M")
+
+    # ── SubAgents ─────────────────────────────────────────
+    for i, a in enumerate(agents):
+        icon = AGENT_ICONS.get(a["type"], "🤖")
+        detail = a["status"]
+        if a.get("elapsed"):
+            detail += f" {a['elapsed']}s"
+
+        nid = f"S{i}"
+        label = f"{icon} {a['type']}<br/><small>{detail}</small>"
+        lines.append(f'    {nid}["{label}"]')
+
+        # Main → SubAgent edge: type name only
+        lines.append(f'    M --> {nid}')
+
+        # SubAgent → Main feedback: simple status only
+        if a["status"] == "completed":
+            lines.append(f'    {nid} -.->|"done"| M')
+        elif a["status"] == "failed":
+            lines.append(f'    {nid} -.->|"failed"| M')
+
+    # ── Main Agent → User (완료 시) ──────────────────────
+    if has_result:
+        lines.append('    M ==>|"Response"| U')
+
+    # ── Styles ────────────────────────────────────────────
+    lines.append(
+        "    style U fill:#eff6ff,stroke:#3b82f6,"
+        "stroke-width:2px,color:#1e40af"
+    )
+    if has_result:
+        lines.append(
+            "    style M fill:#f0fdf4,stroke:#22c55e,"
+            "stroke-width:2px,color:#166534"
+        )
+    elif is_working:
+        lines.append(
+            "    style M fill:#dcfce7,stroke:#16a34a,"
+            "stroke-width:3px,color:#166534"
+        )
+    else:
+        lines.append(
+            "    style M fill:#f0fdf4,stroke:#22c55e,"
+            "stroke-width:2px,color:#166534"
+        )
+
+    _STATUS_STYLE = {
+        "pending":   "fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,color:#92400e",
+        "running":   "fill:#dcfce7,stroke:#16a34a,stroke-width:3px,color:#166534",
+        "completed": "fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#475569",
+        "failed":    "fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#991b1b",
+    }
+    for i, a in enumerate(agents):
+        s = _STATUS_STYLE.get(a["status"], _STATUS_STYLE["pending"])
+        lines.append(f"    style S{i} {s}")
+
+    return "\n".join(lines)
+
+
+def _build_page_html(
+    mermaid_def: str,
+    events: list[dict],
+    is_working: bool,
+    tooltips: dict[str, str] | None = None,
+) -> str:
+    """Build a self-contained HTML page with Mermaid chart + Event Feed.
+
+    This HTML is rendered inside an iframe via Streamlit's st.iframe() API.
+    Mermaid JS is loaded from jsDelivr CDN and renders entirely client-side.
+    """
+    # Build event feed HTML
+    evt_parts: list[str] = []
+    for e in events:
+        css = e.get("css_class", "")
+        ts = e.get("time", "")
+        evt_parts.append(
+            f'<div class="ev {css}">'
+            f'<span class="ts">{ts}</span> '
+            f'{e["icon"]} {e["text"]}'
+            f"</div>"
+        )
+    events_html = "\n".join(evt_parts)
+
+    # Build JSON map for edge-label tooltips.
+    # Sanitise values: they end up as HTML title attributes AND live inside
+    # a <script> block, so we must neutralise </script> injection and
+    # control characters.  json.dumps with ensure_ascii=True is safest.
+    import json as _json
+    _safe_tips: dict[str, str] = {}
+    for _k, _v in (tooltips or {}).items():
+        _sv = _v.replace("\r", "").replace("\x00", "")
+        # Prevent </script> injection
+        _sv = _sv.replace("</", "<\\/")
+        _safe_tips[_k] = _sv
+    tooltip_json = _json.dumps(_safe_tips, ensure_ascii=True)
+
+    # Optional CSS pulse for "working" state
+    pulse_css = """
+    @keyframes pulse {
+        0%,100% { filter: drop-shadow(0 0 2px rgba(22,163,74,.15)); }
+        50%     { filter: drop-shadow(0 0 14px rgba(22,163,74,.45)); }
+    }
+    .mermaid svg { animation: pulse 1.8s ease-in-out infinite; }
+    """ if is_working else ""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  background:#fff;color:#1e293b;padding:16px 12px 8px}}
+
+/* Mermaid chart */
+.mermaid{{text-align:center;min-height:100px;margin-bottom:8px}}
+.mermaid svg{{max-width:100%}}
+{pulse_css}
+
+/* Event Feed */
+.evts{{padding:8px 12px;background:#f8fafc;border:1px solid #e2e8f0;
+  border-radius:10px;max-height:175px;overflow-y:auto;scroll-behavior:smooth}}
+.evts-t{{font-size:10.5px;font-weight:700;color:#475569;
+  margin-bottom:5px;letter-spacing:.3px}}
+.ev{{font-size:10.5px;padding:2px 0 2px 8px;color:#334155;
+  border-left:2px solid #e2e8f0;margin-bottom:2px;line-height:1.45}}
+.ev.subagent{{border-left-color:#a78bfa}}
+.ev.tool{{border-left-color:#60a5fa}}
+.ev.memory{{border-left-color:#34d399}}
+.ev.done{{border-left-color:#22c55e}}
+.ev.error{{border-left-color:#ef4444}}
+.ev .ts{{color:#94a3b8;font-family:monospace;font-size:9px;margin-right:4px}}
+</style>
+</head>
+<body>
+
+<pre class="mermaid">
+{mermaid_def}
+</pre>
+
+<div class="evts" id="ev">
+  {events_html}
+</div>
+
+<script>
+mermaid.initialize({{
+  startOnLoad:true,
+  theme:'base',
+  themeVariables:{{
+    fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+    fontSize:'13px',
+    lineColor:'#94a3b8',
+    edgeLabelBackground:'#ffffff'
+  }},
+  flowchart:{{
+    useMaxWidth:true,
+    htmlLabels:true,
+    curve:'basis',
+    nodeSpacing:50,
+    rankSpacing:80
+  }}
+}});
+document.getElementById('ev').scrollTop=
+  document.getElementById('ev').scrollHeight;
+
+// ── Tooltip injection: hover on truncated edge labels to see full text ──
+var _tooltips = {tooltip_json};
+mermaid.run().then(function(){{
+  document.querySelectorAll('.edgeLabel span, .edgeLabel p, .edgeLabel div, .edgeLabel foreignObject span').forEach(function(el){{
+    var txt = (el.textContent||'').trim();
+    if(_tooltips[txt]){{
+      el.title = _tooltips[txt];
+      el.style.cursor = 'help';
+    }}
+  }});
+}}).catch(function(){{}});
+</script>
+</body></html>"""
+
+
+def _render_mermaid(
+    placeholder,
+    mermaid_def: str,
+    events: list[dict],
+    is_working: bool,
+    num_agents: int = 0,
+    tooltips: dict[str, str] | None = None,
+) -> None:
+    """Render Mermaid flowchart + event feed inside an iframe.
+
+    Uses Streamlit 1.56+ st.iframe() which accepts raw HTML strings directly
+    (auto-detected as srcdoc). The Mermaid CDN script loads naturally inside
+    the iframe sandbox, avoiding DOMPurify sanitisation issues with st.html().
+
+    No 'scrolling' kwarg — the new st.iframe API removed it.
+    """
+    html = _build_page_html(mermaid_def, events, is_working, tooltips=tooltips)
+    h = max(420, 260 + num_agents * 70)
+    with placeholder:
+        st.iframe(html, height=h)
+
+
+# ─────────────────────────────────────────────────────────
+#  Streaming logic
+# ─────────────────────────────────────────────────────────
+
+def _stream_response(
+    prompt: str,
+    graph_ph,
+    result_ph,
+    sa_mw,
+) -> None:
+    """Stream agent response — update flowchart, event feed, and result."""
+    comp = st.session_state.agent_components
+    if not comp:
+        return
+
+    agent = comp["agent"]
+    fallback_mw = comp["fallback_middleware"]
+    loop_guard = comp["loop_guard"]
+
+    st.session_state.chat_messages.append({"role": "user", "content": prompt})
+    loop_guard.reset()
+
+    # ── Per-query unique thread ID (각 질의는 독립적 대화 컨텍스트) ──
+    import uuid as _uuid
+    query_id = _uuid.uuid4().hex[:8]
+    config = {"configurable": {"thread_id": f"webui-{query_id}"}}
+    inputs = {"messages": [HumanMessage(content=prompt)]}
+
+    final_text = ""
+    current_model = ""
+    tools_used: list[dict] = []
+    events: list[dict] = []  # 질의별 독립 이벤트 리스트
+    step_count = 0
+    t_start = time.time()
+
+    # Local SubAgent tracking — 질의별 독립 (registry는 세션 공유이므로 사용하지 않음)
+    tracked_agents: list[dict] = []
+    _sa_counter = [0]  # mutable counter for unique IDs
+
+    # ── helpers ───────────────────────────────────────────
+
+    def _evt(icon: str, text: str, css: str = "", refresh: bool = True) -> None:
+        ts = time.strftime("%H:%M:%S")
+        events.append({"icon": icon, "text": text, "css_class": css, "time": ts})
+        if refresh:
+            _refresh(True)
+
+    def _track_spawn(agent_type: str, description: str) -> int:
+        """Record a SubAgent spawn locally. Returns the index."""
+        idx = _sa_counter[0]
+        _sa_counter[0] += 1
+        tracked_agents.append({
+            "id": f"local_{idx}",
+            "type": agent_type,
+            "status": "running",
+            "elapsed": "",
+            "query": description[:60],
+            "model": "",
+            "started_at": time.time(),
+        })
+        return idx
+
+    def _track_complete(
+        agent_type: str,
+        success: bool = True,
+        model: str = "",
+        result_summary: str = "",
+    ) -> None:
+        """Mark the most recent running SubAgent of the given type as done."""
+        for a in reversed(tracked_agents):
+            if a["type"] == agent_type and a["status"] == "running":
+                a["status"] = "completed" if success else "failed"
+                a["elapsed"] = f"{time.time() - a['started_at']:.1f}"
+                if model:
+                    a["model"] = model
+                if result_summary:
+                    a["result_summary"] = result_summary
+                break
+
+    def _agents_state() -> list[dict]:
+        """Return locally tracked SubAgents for THIS query only.
+
+        Does NOT fall back to registry (which is session-global) to avoid
+        mixing SubAgent history from previous queries into this Mermaid graph.
+        """
+        return list(tracked_agents)
+
+    def _refresh(working: bool, result: str = "", model: str = "") -> None:
+        agents = _agents_state()
+        mdef, tips = _build_mermaid(
+            agents, working, prompt,
+            result_text=result, model_name=model,
+        )
+        _render_mermaid(graph_ph, mdef, events, working, num_agents=len(agents), tooltips=tips)
+
+    # ── Non-streaming fallback ────────────────────────────
+
+    try:
+        _evt("🚀", f"Prompt received ({len(prompt)} chars)", "tool")
+
+        if not hasattr(agent, "stream"):
+            _evt("⚠️", "Agent lacks .stream() — using non-streaming invoke", "tool")
+            result = agent.invoke(inputs, config=config)
+            for msg in result.get("messages", []):
+                if getattr(msg, "type", None) == "ai" and msg.content:
+                    final_text = (
+                        msg.content if isinstance(msg.content, str)
+                        else str(msg.content)
+                    )
+                elif getattr(msg, "type", None) == "tool":
+                    tname = getattr(msg, "name", "?")
+                    tools_used.append({
+                        "name": tname,
+                        "result": str(msg.content)[:200] if msg.content else "",
+                        "is_subagent": tname in ("spawn_subagent", "list_subagents"),
+                    })
+                    _evt("🔧", f"Tool <b>{tname}</b> executed", "tool")
+
+            with result_ph:
+                _model_tag = ""
+                _cm = fallback_mw.current_model or "?"
+                if _cm:
+                    _model_tag = f"<div class='agent-bubble-model'>🧠 {_escape_html(_cm)}</div>"
+                st.markdown(
+                    f"<div class='agent-bubble'>{final_text or '*(No response)*'}{_model_tag}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            current_model = fallback_mw.current_model or "?"
+            elapsed_s = f"{time.time() - t_start:.1f}"
+            _evt("🏁", f"Done — <b>{current_model}</b> · {elapsed_s}s · {len(final_text):,} chars", "done")
+            # 최종 Mermaid: Main Agent → User edge 포함
+            _refresh(False, result=final_text, model=current_model)
+
+            inv_agents = _agents_state()
+            inv_mdef, inv_tips = _build_mermaid(
+                inv_agents, False, prompt,
+                result_text=final_text, model_name=current_model,
+            )
+            st.session_state.chat_messages.append({
+                "role": "assistant",
+                "content": final_text or "*(No response)*",
+                "model": current_model,
+                "tools_used": tools_used,
+                "activity_log": [(e["icon"], e["text"]) for e in events],
+                "mermaid_def": inv_mdef,
+                "mermaid_tooltips": inv_tips,
+                "mermaid_events": list(events),
+                "num_agents": len(inv_agents),
+            })
+            return
+
+        # ── Streaming mode ────────────────────────────────
+
+        current_model = fallback_mw.current_model or ""
+        _evt("🔄", f"Streaming started (model: <b>{_escape_html(current_model or 'selecting…')}</b>)", "tool")
+
+        for chunk in agent.stream(inputs, config=config, stream_mode="updates"):
+            step_count += 1
+            for _node, node_output in chunk.items():
+                # Unwrap LangGraph Overwrite wrapper if present
+                if not isinstance(node_output, dict):
+                    node_output = getattr(node_output, "value", None) or {}
+                if not isinstance(node_output, dict):
+                    continue
+
+                # messages may also be wrapped in Overwrite
+                raw_msgs = node_output.get("messages", [])
+                if not isinstance(raw_msgs, list):
+                    raw_msgs = getattr(raw_msgs, "value", None) or []
+                if not isinstance(raw_msgs, list):
+                    raw_msgs = [raw_msgs] if raw_msgs else []
+
+                for msg in raw_msgs:
+                    msg_type = getattr(msg, "type", None)
+
+                    if msg_type == "ai":
+                        tool_calls = getattr(msg, "tool_calls", [])
+                        if tool_calls:
+                            for tc in tool_calls:
+                                name = tc.get("name", "unknown")
+                                args = tc.get("args", {})
+                                if name == "spawn_subagent":
+                                    atype = args.get("agent_type", "general")
+                                    full_desc = args.get("task_description", "")
+                                    desc = _escape_html(full_desc[:60])
+                                    # Track locally so Mermaid shows it immediately
+                                    _track_spawn(atype, full_desc)
+                                    _evt(
+                                        AGENT_ICONS.get(atype, "🤖"),
+                                        f"Spawning <b>{atype}</b> SubAgent: {desc}",
+                                        "subagent",
+                                    )
+                                elif name == "list_subagents":
+                                    _evt("📋", "Listing SubAgents status", "subagent")
+                                elif "memory_store" in name:
+                                    cat = args.get("category", "?")
+                                    _evt("🧠", f"Storing memory → <b>{cat}</b>", "memory")
+                                elif "memory_search" in name:
+                                    q = _escape_html(args.get("query", "")[:40])
+                                    _evt("🧠", f"Searching memory: {q}", "memory")
+                                else:
+                                    arg_summary = ", ".join(
+                                        f"{k}={str(v)[:20]}" for k, v in list(args.items())[:3]
+                                    )
+                                    _evt("🔧", f"Calling <b>{name}</b>({_escape_html(arg_summary)})", "tool")
+
+                        content = (
+                            msg.content
+                            if isinstance(msg.content, str)
+                            else str(msg.content) if msg.content
+                            else ""
+                        )
+                        if content and not tool_calls:
+                            final_text = content
+                            with result_ph:
+                                st.markdown(
+                                    f"<div class='agent-bubble'>{final_text}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                            _evt(
+                                "💬",
+                                f"AI response received ({len(content):,} chars)",
+                                "done",
+                            )
+
+                    elif msg_type == "tool":
+                        tool_name = getattr(msg, "name", "unknown")
+                        tool_content = (
+                            str(msg.content)[:300] if msg.content else ""
+                        )
+                        is_sa = tool_name in ("spawn_subagent", "list_subagents")
+                        tools_used.append({
+                            "name": tool_name,
+                            "result": tool_content,
+                            "is_subagent": is_sa,
+                        })
+
+                        if tool_name == "spawn_subagent":
+                            # Extract info from registry history for model/elapsed
+                            model_label = ""
+                            sa_type = ""
+                            sa_elapsed = ""
+                            sa_model_short = ""
+                            try:
+                                for t in reversed(sa_mw.registry.history):
+                                    sa_type = getattr(t, "agent_type", "")
+                                    if hasattr(t, "model_used") and t.model_used:
+                                        sa_model_short = t.model_used.split("/")[-1][:20]
+                                        model_label = f" · 🧠 <b>{sa_model_short}</b>"
+                                    if hasattr(t, "completed_at") and hasattr(t, "created_at"):
+                                        if t.completed_at and t.created_at:
+                                            sa_elapsed = f" · {t.completed_at - t.created_at:.1f}s"
+                                    break
+                            except Exception:
+                                pass
+
+                            # Extract raw result from tool output (no truncation)
+                            _result_raw = ""
+                            if "Result:" in tool_content:
+                                _ri = tool_content.index("Result:") + 7
+                                _result_raw = tool_content[_ri:].strip()
+                            elif tool_content.strip():
+                                _result_raw = tool_content.strip()
+
+                            if "Result:" in tool_content or "result" in tool_content.lower()[:30]:
+                                _track_complete(sa_type or "general", success=True, model=sa_model_short, result_summary=_result_raw)
+                                icon = AGENT_ICONS.get(sa_type, "✅")
+                                result_preview = _escape_html(tool_content[:80])
+                                _evt(icon, f"SubAgent <b>{sa_type}</b> completed{sa_elapsed}{model_label}: {result_preview}", "done")
+                            elif "failed" in tool_content.lower():
+                                _track_complete(sa_type or "general", success=False, model=sa_model_short, result_summary=_result_raw)
+                                err_preview = _escape_html(tool_content[:80])
+                                _evt("❌", f"SubAgent failed: {err_preview}", "error")
+                            else:
+                                _track_complete(sa_type or "general", success=True, model=sa_model_short, result_summary=_result_raw)
+                                _evt("🔄", f"SubAgent returned: {_escape_html(tool_content[:60])}", "subagent")
+                            # SubAgent 상태 변경 → Mermaid 즉시 갱신
+                            _refresh(True)
+
+                        elif tool_name == "list_subagents":
+                            count = tool_content.count("[")
+                            _evt("📋", f"SubAgent list returned ({count} entries)", "subagent")
+                            _refresh(True)
+
+                        elif "memory_store" in tool_name:
+                            _evt("✅", f"Memory stored: {_escape_html(tool_content[:60])}", "done")
+
+                        elif "memory_search" in tool_name:
+                            n_results = tool_content.count("---") + (1 if tool_content.strip() and "No relevant" not in tool_content else 0)
+                            _evt("✅", f"Memory search returned {n_results} results", "done")
+
+                        else:
+                            preview = _escape_html(tool_content[:60])
+                            _evt("✅", f"<b>{tool_name}</b> → {preview}", "done")
+
+                # 매 chunk마다 모델명 갱신 시도
+                if fallback_mw.current_model:
+                    current_model = fallback_mw.current_model
+
+        # ── Extract final text if not captured ────────────
+
+        if not final_text:
+            try:
+                state = agent.get_state(config)
+                for msg in reversed(state.values.get("messages", [])):
+                    if getattr(msg, "type", None) == "ai" and msg.content:
+                        final_text = (
+                            msg.content
+                            if isinstance(msg.content, str)
+                            else str(msg.content)
+                        )
+                        break
+            except Exception:
+                pass
+
+        if not final_text:
+            final_text = "*(No response generated)*"
+
+        current_model = fallback_mw.current_model or current_model or "unknown"
+        _model_tag = f"<div class='agent-bubble-model'>🧠 {_escape_html(current_model)}</div>"
+        with result_ph:
+            st.markdown(
+                f"<div class='agent-bubble'>{final_text}{_model_tag}</div>",
+                unsafe_allow_html=True,
+            )
+        elapsed_s = f"{time.time() - t_start:.1f}"
+        _evt(
+            "🏁",
+            f"Completed — <b>{current_model}</b> · {step_count} steps · {elapsed_s}s · {len(final_text):,} chars",
+            "done",
+        )
+        # 최종 Mermaid: Main Agent → User edge 포함
+        _refresh(False, result=final_text, model=current_model)
+
+        # Mermaid 최종 스냅샷 저장 (History 탭용)
+        final_agents = _agents_state()
+        final_mdef, final_tips = _build_mermaid(
+            final_agents, False, prompt,
+            result_text=final_text, model_name=current_model,
+        )
+
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": final_text,
+            "model": current_model,
+            "tools_used": tools_used,
+            "activity_log": [(e["icon"], e["text"]) for e in events],
+            "mermaid_def": final_mdef,
+            "mermaid_tooltips": final_tips,
+            "mermaid_events": list(events),
+            "num_agents": len(final_agents),
+        })
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error("Agent error: %s\n%s", e, tb)
+        elapsed_s = f"{time.time() - t_start:.1f}"
+        _evt("❌", f"Error after {elapsed_s}s: {_escape_html(str(e))}", "error")
+        with result_ph:
+            st.error(f"Error: {e}")
+            with st.expander("Traceback"):
+                st.code(tb, language="python")
+        _refresh(False)
+        err_agents = _agents_state()
+        err_mdef, err_tips = _build_mermaid(err_agents, False, prompt)
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": f"Error: {e}",
+            "model": None,
+            "tools_used": [],
+            "mermaid_def": err_mdef,
+            "mermaid_tooltips": err_tips,
+            "mermaid_events": list(events),
+            "num_agents": len(err_agents),
+        })
+
+
+# ─────────────────────────────────────────────────────────
+#  Page renderer
+# ─────────────────────────────────────────────────────────
+
+def render_chat() -> None:
+    """Render the Chat page.
+
+    Layout:
+      ┌──────────────────────────────────────────────────────┐
+      │  (idle) Danny's Coding AI Agent  (중앙 타이틀)        │
+      │  (active) 👤 User bubble  │  🔍 Agent 동작 분석      │
+      │           💬 Result (full-width)                      │
+      ├──────────────────────────────────────────────────────┤
+      │  📌 PROMPT 프리셋 버튼                                │
+      │  📝 입력창  │ 🚀 Send │ 🔄 New Chat                  │
+      └──────────────────────────────────────────────────────┘
+    """
+    comp = st.session_state.get("agent_components")
+    if not comp:
+        st.warning("Agent not initialized.")
+        return
+
+    sa_mw = comp["subagent_middleware"]
+
+    # ── Session state defaults ────────────────────────────
+    for k, v in [
+        ("_is_running", False),
+        ("_has_result", False),
+    ]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # Pending prompt: set by Send button, consumed this render cycle
+    pending = st.session_state.pop("_pending_prompt", None)
+    is_running = st.session_state["_is_running"]
+
+    # 전송 후 입력창 비우기 — 위젯 렌더링 전에 처리해야 함
+    if st.session_state.pop("_clear_prompt", False):
+        st.session_state["_prompt_area"] = ""
+
+    # ── Page-level CSS ────────────────────────────────────
+    st.markdown("""
+    <style>
+    section[data-testid="stMain"] .block-container {
+        padding-top: 1.2rem;
+        padding-left: 1.5rem;
+        padding-right: 1.5rem;
+        max-width: 100%;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 10px;
+    }
+    /* Chat bubble styles — User (right, blue) */
+    .user-bubble {
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        border-radius: 16px 16px 4px 16px;
+        padding: 14px 18px;
+        margin: 6px 0;
+        font-size: 0.95em;
+        color: #1e40af;
+        line-height: 1.55;
+        word-break: break-word;
+    }
+    .user-bubble-label {
+        font-size: .75em;
+        font-weight: 700;
+        color: #3b82f6;
+        margin-bottom: 4px;
+        letter-spacing: .3px;
+    }
+    /* Chat bubble styles — Agent (left, green) */
+    .agent-bubble {
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        border-radius: 16px 16px 16px 4px;
+        padding: 14px 18px;
+        margin: 6px 0;
+        font-size: 0.95em;
+        color: #166534;
+        line-height: 1.55;
+        word-break: break-word;
+        max-height: 500px;
+        overflow-y: auto;
+    }
+    .agent-bubble-label {
+        font-size: .75em;
+        font-weight: 700;
+        color: #16a34a;
+        margin-bottom: 4px;
+        letter-spacing: .3px;
+    }
+    .agent-bubble-model {
+        font-size: .7em;
+        color: #6b7280;
+        margin-top: 8px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Determine conversation state ─────────────────────
+    has_conversation = bool(st.session_state.chat_messages) or pending or is_running
+    has_result = st.session_state.get("_has_result", False)
+
+    # ── 1. Main content area ─────────────────────────────
+    graph_ph = st.empty()
+    result_ph_ref = {"ph": None}
+
+    if not has_conversation:
+        # ── Idle state: centered title (no heavy Mermaid render) ──
+        st.markdown(
+            "<div style='text-align:center;padding:100px 20px 60px'>"
+            "<h1 style='color:#1e293b;font-size:2em;margin-bottom:8px'>"
+            "Danny's Coding AI Agent</h1>"
+            "<p style='color:#94a3b8;font-size:1.05em'>"
+            "메시지를 입력하거나 프롬프트를 클릭하세요</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        # Lightweight hidden placeholders (no iframe rendering)
+        result_ph_ref["ph"] = st.empty()
+
+    else:
+        # ── Active conversation: chat-style layout ────────
+
+        # Title (compact)
+        st.markdown(
+            "<p style='text-align:center;color:#94a3b8;font-size:.85em;"
+            "margin:0 0 12px;letter-spacing:.3px'>"
+            "Danny's Coding AI Agent</p>",
+            unsafe_allow_html=True,
+        )
+
+        # Show previous conversation pairs (history within session)
+        # Layout: [💬 Result (left)] [👤 User (right)] → [🔍 Agent 동작 분석 (below)]
+        _last_user_content = ""
+        for msg in st.session_state.chat_messages:
+            if msg["role"] == "user":
+                _last_user_content = msg["content"]
+
+            elif msg["role"] == "assistant":
+                # ── Row: Agent bubble (left) + User bubble (right) ──
+                agent_col, user_col = st.columns([3, 2])
+
+                with agent_col:
+                    model_html = ""
+                    if msg.get("model"):
+                        model_html = f"<div class='agent-bubble-model'>🧠 {_escape_html(msg['model'])}</div>"
+                    st.markdown(
+                        f"<div class='agent-bubble-label'>🤖 Agent</div>"
+                        f"<div class='agent-bubble'>{msg['content']}{model_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                with user_col:
+                    st.markdown(
+                        f"<div class='user-bubble-label'>👤 User</div>"
+                        f"<div class='user-bubble'>{_escape_html(_last_user_content)}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # ── Below: Agent 동작 분석 (full width) ───────
+                if msg.get("mermaid_def"):
+                    _hist_html = _build_page_html(
+                        msg["mermaid_def"],
+                        msg.get("mermaid_events", []),
+                        False,
+                        tooltips=msg.get("mermaid_tooltips", {}),
+                    )
+                    _h = max(350, 220 + msg.get("num_agents", 0) * 70)
+                    with st.expander("🔍 Agent 동작 분석", expanded=False):
+                        st.iframe(_hist_html, height=_h)
+
+                st.markdown("<hr style='border:none;border-top:1px solid #e2e8f0;margin:12px 0'>",
+                            unsafe_allow_html=True)
+
+        # ── Live interaction area (current pending/running) ──
+        # Layout: [💬 Result (left)] [👤 User (right)] → [🔍 Agent 동작 분석 (below)]
+        if pending or is_running:
+            agent_col, user_col = st.columns([3, 2])
+
+            with user_col:
+                prompt_display = pending or "(processing…)"
+                st.markdown(
+                    f"<div class='user-bubble-label'>👤 User</div>"
+                    f"<div class='user-bubble'>{_escape_html(prompt_display)}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with agent_col:
+                st.markdown(
+                    "<div class='agent-bubble-label'>🤖 Agent</div>",
+                    unsafe_allow_html=True,
+                )
+                result_ph_ref["ph"] = st.empty()
+
+            # Agent 동작 분석 (full width, below)
+            st.markdown(
+                "<p style='margin:10px 0 4px;font-size:.8em;font-weight:700;"
+                "color:#64748b;letter-spacing:.4px'>🔍 AGENT 동작 분석</p>",
+                unsafe_allow_html=True,
+            )
+            graph_ph = st.empty()
+            idle_def, tips = _build_mermaid([], True, pending or "")
+            _render_mermaid(graph_ph, idle_def, [], True, num_agents=0, tooltips=tips)
+        else:
+            result_ph_ref["ph"] = st.empty()
+
+    # ── Bottom section: Prompt presets + Input ────────────
+    st.markdown(
+        "<hr style='border:none;border-top:1px solid #e2e8f0;margin:16px 0 8px'>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Prompt 프리셋 버튼 ────────────────────────────────
+    st.markdown(
+        "<p style='margin:4px 0 6px;font-size:.8em;font-weight:700;"
+        "color:#64748b;letter-spacing:.4px'>📌 PROMPT</p>",
+        unsafe_allow_html=True,
+    )
+    tp_cols = st.columns(len(TEST_PROMPTS))
+    for i, (label, p) in enumerate(TEST_PROMPTS.items()):
+        with tp_cols[i]:
+            if st.button(
+                f"▶ {label}",
+                key=f"test_{label}",
+                use_container_width=True,
+                disabled=is_running,
+            ):
+                st.session_state["_prompt_area"] = p
+                st.rerun()
+
+    # ── 질의 입력창 + Send + New Chat ────────────────────
+    input_col, send_col, new_col = st.columns([6, 1, 1])
+    with input_col:
+        # ★ 입력창: is_running일 때만 disabled (idle 상태에서는 항상 활성)
+        user_input = st.text_area(
+            "prompt",
+            key="_prompt_area",
+            height=80,
+            disabled=is_running,
+            label_visibility="collapsed",
+            placeholder="Ask me anything about coding…",
+        )
+    with send_col:
+        # ★ Send: 실행 중이거나 입력이 비어있으면 비활성
+        send_clicked = st.button(
+            "🚀 Send",
+            use_container_width=True,
+            disabled=is_running or not (user_input or "").strip(),
+            type="primary",
+        )
+    with new_col:
+        # ★ New Chat: 결과가 있고 실행 중이 아닐 때만 활성
+        new_chat_clicked = st.button(
+            "🔄 New Chat",
+            use_container_width=True,
+            disabled=is_running or not has_result,
+            type="secondary",
+        )
+    if send_clicked and user_input and user_input.strip():
+        st.session_state["_pending_prompt"] = user_input.strip()
+        st.session_state["_clear_prompt"] = True
+        st.rerun()
+    if new_chat_clicked:
+        st.session_state["_has_result"] = False
+        st.session_state["chat_messages"] = []
+        st.session_state["_clear_prompt"] = True
+        st.rerun()
+
+    # ── Pending prompt 실행 ───────────────────────────────
+    if pending:
+        st.session_state["_is_running"] = True
+        try:
+            _stream_response(pending, graph_ph, result_ph_ref["ph"], sa_mw)
+        finally:
+            st.session_state["_is_running"] = False
+            st.session_state["_has_result"] = True
+            # ★ 실행 완료 후 rerun → 입력창 활성화 + New Chat 활성화
+            st.rerun()

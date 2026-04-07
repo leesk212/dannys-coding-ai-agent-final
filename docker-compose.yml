@@ -1,0 +1,38 @@
+services:
+  coding-agent:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - LOCAL_FALLBACK_MODEL=${LOCAL_FALLBACK_MODEL:-qwen2.5-coder:7b}
+      - MEMORY_DIR=/root/.coding_agent/memory
+      - MAX_SUBAGENTS=${MAX_SUBAGENTS:-3}
+    volumes:
+      # Persist long-term memory across restarts
+      - agent-memory:/root/.coding_agent/memory
+      # Mount working directory for file operations
+      - ./workspace:/workspace
+    restart: unless-stopped
+
+  # Optional: Local LLM via Ollama
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - with-ollama
+
+volumes:
+  agent-memory:
+  ollama-models:
