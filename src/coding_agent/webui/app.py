@@ -196,33 +196,44 @@ def main():
         st.stop()
 
     # ── Settings 버튼: 좌측 하단 고정 (사이드바 없이) ─────────────────
+    # Streamlit은 HTML div로 버튼을 감쌀 수 없으므로,
+    # 버튼을 먼저 렌더링한 뒤 JS로 찾아서 fixed 위치로 이동시킨다.
+    if st.button("⚙️ Settings", key="nav_settings"):
+        if st.session_state.page != "settings":
+            st.session_state.page = "settings"
+            st.rerun()
+        else:
+            st.session_state.page = "chat"
+            st.rerun()
+
     st.markdown(
         """<style>
         [data-testid="stSidebar"] {display:none !important;}
-        .settings-btn-wrap {
-            position:fixed; bottom:1.2rem; left:1.2rem; z-index:9999;
-        }
-        .settings-btn-wrap button {
-            background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px;
-            padding:0.4rem 1rem; font-size:0.85rem; cursor:pointer;
-            color:#475569; transition:background 0.15s;
-        }
-        .settings-btn-wrap button:hover {background:#e2e8f0;}
-        </style>""",
+        </style>
+        <script>
+        (function() {
+            function moveBtn() {
+                const btns = window.parent.document.querySelectorAll('button[kind="secondary"]');
+                for (const btn of btns) {
+                    if (btn.textContent.includes('Settings')) {
+                        const wrapper = btn.closest('[data-testid="stVerticalBlock"]')
+                            ? btn.closest('[data-testid="element-container"]') || btn.parentElement
+                            : btn.parentElement;
+                        wrapper.style.cssText =
+                            'position:fixed !important; bottom:1.2rem; left:1.2rem; z-index:9999; width:auto;';
+                        btn.style.cssText =
+                            'background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; ' +
+                            'padding:0.4rem 1rem; font-size:0.85rem; cursor:pointer; color:#475569;';
+                        return;
+                    }
+                }
+                setTimeout(moveBtn, 200);
+            }
+            moveBtn();
+        })();
+        </script>""",
         unsafe_allow_html=True,
     )
-    # Streamlit 네이티브 버튼을 fixed div로 감싸기
-    settings_col = st.container()
-    with settings_col:
-        st.markdown("<div class='settings-btn-wrap'>", unsafe_allow_html=True)
-        if st.button("⚙️ Settings", key="nav_settings"):
-            if st.session_state.page != "settings":
-                st.session_state.page = "settings"
-                st.rerun()
-            else:
-                st.session_state.page = "chat"
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Page routing ─────────────────────────────────────────────────
     page = st.session_state.page
