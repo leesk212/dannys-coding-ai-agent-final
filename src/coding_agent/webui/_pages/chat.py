@@ -110,10 +110,10 @@ def _build_mermaid(
     agents: list[dict],
     is_working: bool,
     prompt_text: str = "",
-    has_result: bool = False,
+    result_text: str = "",
     model_name: str = "",
-) -> str:
-    """Return a clean Mermaid graph LR string.
+) -> tuple[str, dict[str, str]]:
+    """Return a (mermaid_definition, tooltips) tuple.
 
     ★ Edge labels use ONLY safe, hardcoded short text — never raw AI output.
        AI 응답 내용은 말풍선에서 보여주므로 Mermaid에는 흐름만 표시.
@@ -123,6 +123,7 @@ def _build_mermaid(
       M  = Main Agent  (rectangle)
       S0 … Sn = SubAgents  (rectangle, coloured by status)
     """
+    has_result = bool(result_text)
     lines = ["graph LR"]
 
     # ── User ──────────────────────────────────────────────
@@ -204,7 +205,12 @@ def _build_mermaid(
         s = _STATUS_STYLE.get(a["status"], _STATUS_STYLE["pending"])
         lines.append(f"    style S{i} {s}")
 
-    return "\n".join(lines)
+    # Build tooltip map: node_id → description
+    tooltips: dict[str, str] = {"U": "User", "M": m_detail}
+    for i, a in enumerate(agents):
+        tooltips[f"S{i}"] = f"{a['type']}: {a['status']}"
+
+    return "\n".join(lines), tooltips
 
 
 def _build_page_html(
