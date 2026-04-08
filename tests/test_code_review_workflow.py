@@ -7,6 +7,10 @@ import unittest
 from dataclasses import dataclass
 
 from coding_agent.middleware.async_only_subagents import AsyncOnlySubagentsMiddleware
+from coding_agent.middleware.async_task_completion import (
+    AsyncTaskCompletionMiddleware,
+    COMPLETION_POLICY_PROMPT,
+)
 from coding_agent.webui._pages.chat import TEST_PROMPTS
 
 
@@ -19,6 +23,8 @@ class CodeReviewPromptTests(unittest.TestCase):
         self.assertIn("code_writer", prompt)
         self.assertIn("reviewer", prompt)
         self.assertIn("launch two async tasks", prompt)
+        self.assertIn("collect", prompt)
+        self.assertIn("same response", prompt)
 
 
 @dataclass
@@ -32,6 +38,14 @@ class _FakeRequest:
 
     def override(self, tools):
         return _FakeRequest(tools)
+
+
+class _FakeRequestWithSystem:
+    def __init__(self, system_message: str):
+        self.system_message = system_message
+
+    def override(self, system_message: str):
+        return _FakeRequestWithSystem(system_message)
 
 
 class AsyncOnlySubagentsMiddlewareTests(unittest.TestCase):
@@ -78,6 +92,24 @@ class AsyncOnlySubagentsMiddlewareTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(seen["tools"], ["start_async_task", "check_async_task"])
+
+
+class AsyncTaskCompletionMiddlewareTests(unittest.TestCase):
+    def test_wrap_model_call_appends_completion_policy(self) -> None:
+        mw = AsyncTaskCompletionMiddleware()
+        request = _FakeRequestWithSystem("BASE")
+
+        seen = {}
+
+        def handler(filtered_request):
+            seen["system"] = filtered_request.system_message
+            return "ok"
+
+        result = mw.wrap_model_call(request, handler)
+        self.assertEqual(result, "ok")
+        self.assertIn("BASE", seen["system"])
+        self.assertIn("complete within the same user turn", seen["system"])
+        self.assertIn(COMPLETION_POLICY_PROMPT.strip().splitlines()[0], seen["system"])
 
 
 if __name__ == "__main__":

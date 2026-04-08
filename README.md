@@ -164,6 +164,7 @@ src/coding_agent/
 - SubAgent 결과는 task ID 단위로 조회/업데이트/취소합니다.
 - WebUI는 conversation 단위 `thread_id`를 유지하고, Mermaid에 task 흐름을 반영합니다.
 - 각 assistant 결과는 `async_task_snapshot`을 함께 저장해 히스토리 시점 비교가 가능합니다.
+- 기본 정책은 "동일 질의 내 결과 취합"입니다. 별도 요청이 없으면 launch 후 `check_async_task`로 결과를 모아 최종 답변을 만듭니다.
 
 ## Troubleshooting
 

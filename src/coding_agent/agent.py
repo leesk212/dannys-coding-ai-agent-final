@@ -11,6 +11,7 @@ from coding_agent.async_subagent_manager import LocalAsyncSubagentManager
 from coding_agent.async_task_tracker import AsyncTaskTracker
 from coding_agent.config import Settings, settings
 from coding_agent.middleware.async_only_subagents import AsyncOnlySubagentsMiddleware
+from coding_agent.middleware.async_task_completion import AsyncTaskCompletionMiddleware
 from coding_agent.middleware.long_term_memory import LongTermMemoryMiddleware
 from coding_agent.middleware.model_fallback import ModelFallbackMiddleware
 
@@ -26,8 +27,8 @@ SYSTEM_PROMPT = """You are Danny's Coding AI Agent, a software engineering super
 
 ## Async Subagent Workflow
 - Use `start_async_task` to launch background work when a task is large, parallelizable, or should continue while you reason.
-- After launching, report the exact task ID and stop. Do not immediately poll.
-- Use `check_async_task` only when the user asks for status or results, or when you need to aggregate completed results into a final answer.
+- For normal "solve now" requests, keep working in the same turn until you collect relevant completed async task outputs and synthesize them.
+- Use `check_async_task` to collect results after launch. Only stop immediately after launch when the user explicitly asks for background execution.
 - Use `update_async_task` to change the instructions for an existing task.
 - Use `cancel_async_task` to stop work that is no longer needed.
 - Use `list_async_tasks` when you need a live overview of every active or completed subagent task.
@@ -129,6 +130,7 @@ def create_coding_agent(
     )
     ltm_mw = LongTermMemoryMiddleware(memory_dir=str(cfg.memory_dir))
     async_only_mw = AsyncOnlySubagentsMiddleware()
+    completion_mw = AsyncTaskCompletionMiddleware()
     loop_guard = AgentLoopGuard(max_iterations=cfg.max_iterations)
     subagent_manager = LocalAsyncSubagentManager(cfg=cfg, root_dir=working_dir)
 
@@ -143,7 +145,7 @@ def create_coding_agent(
     agent = create_deep_agent(
         model=fallback_mw.get_model_with_fallback(),
         system_prompt=SYSTEM_PROMPT,
-        middleware=[fallback_mw, ltm_mw, async_only_mw],
+        middleware=[fallback_mw, ltm_mw, async_only_mw, completion_mw],
         tools=ltm_mw.get_tools(),
         subagents=async_subagents,
         memory=_setup_agents_md(),

@@ -48,7 +48,7 @@ TEST_PROMPTS = {
         "If not, list the tracked async tasks."
     ),
     "Code+Review Test": (
-        "Launch two async tasks and stop after launch: "
+        "Launch two async tasks, collect their completed results in this same response, and synthesize final output: "
         "1) code_writer to implement a fibonacci function with type hints and docstring, "
         "2) reviewer to review correctness, edge cases, and test coverage gaps."
     ),
