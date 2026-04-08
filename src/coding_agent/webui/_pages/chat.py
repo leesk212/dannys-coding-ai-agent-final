@@ -774,17 +774,19 @@ def _stream_response(
                         )
                         if content and not tool_calls:
                             final_text = content
+                            _evt(
+                                "💬",
+                                f"AI response received ({len(content):,} chars)",
+                                "done",
+                                refresh=False,
+                            )
+                            _refresh(True, result=final_text, model=current_model)
                             with result_ph:
                                 safe_final_text = _escape_bubble_html(final_text)
                                 st.markdown(
                                     f"<div class='agent-bubble'>{safe_final_text}</div>",
                                     unsafe_allow_html=True,
                                 )
-                            _evt(
-                                "💬",
-                                f"AI response received ({len(content):,} chars)",
-                                "done",
-                            )
 
                     elif msg_type == "tool":
                         tool_name = getattr(msg, "name", "unknown")
@@ -892,20 +894,21 @@ def _stream_response(
 
         current_model = fallback_mw.current_model or current_model or "unknown"
         _model_tag = f"<div class='agent-bubble-model'>🧠 {_escape_html(current_model)}</div>"
+        elapsed_s = f"{time.time() - t_start:.1f}"
+        _evt(
+            "🏁",
+            f"Completed — <b>{current_model}</b> · {step_count} steps · {elapsed_s}s · {len(final_text):,} chars",
+            "done",
+            refresh=False,
+        )
+        # 최종 Mermaid를 먼저 갱신한 뒤 답변 bubble을 채워서 둘이 같이 나타나는 느낌을 준다.
+        _refresh(False, result=final_text, model=current_model)
         with result_ph:
             safe_final_text = _escape_bubble_html(final_text)
             st.markdown(
                 f"<div class='agent-bubble'>{safe_final_text}{_model_tag}</div>",
                 unsafe_allow_html=True,
             )
-        elapsed_s = f"{time.time() - t_start:.1f}"
-        _evt(
-            "🏁",
-            f"Completed — <b>{current_model}</b> · {step_count} steps · {elapsed_s}s · {len(final_text):,} chars",
-            "done",
-        )
-        # 최종 Mermaid: Main Agent → User edge 포함
-        _refresh(False, result=final_text, model=current_model)
 
         # Mermaid 최종 스냅샷 저장 (History 탭용)
         final_agents = _agents_state()
@@ -1138,6 +1141,16 @@ def render_chat() -> None:
         # ── Live interaction area (current pending/running) ──
         # Layout: [💬 Result (left)] [👤 User (right)] → [🔍 Agent 동작 분석 (below)]
         if pending or is_running:
+            # Agent 동작 분석을 먼저 렌더해서 답변 bubble보다 늦게 나타나는 느낌을 줄인다.
+            st.markdown(
+                "<p style='margin:10px 0 4px;font-size:.8em;font-weight:700;"
+                "color:#64748b;letter-spacing:.4px'>🔍 AGENT 동작 분석</p>",
+                unsafe_allow_html=True,
+            )
+            graph_ph = st.empty()
+            idle_def, tips = _build_mermaid([], True, pending or "")
+            _render_mermaid(graph_ph, idle_def, [], True, num_agents=0, tooltips=tips)
+
             agent_col, user_col = st.columns([3, 2])
 
             with user_col:
@@ -1154,16 +1167,6 @@ def render_chat() -> None:
                     unsafe_allow_html=True,
                 )
                 result_ph_ref["ph"] = st.empty()
-
-            # Agent 동작 분석 (full width, below)
-            st.markdown(
-                "<p style='margin:10px 0 4px;font-size:.8em;font-weight:700;"
-                "color:#64748b;letter-spacing:.4px'>🔍 AGENT 동작 분석</p>",
-                unsafe_allow_html=True,
-            )
-            graph_ph = st.empty()
-            idle_def, tips = _build_mermaid([], True, pending or "")
-            _render_mermaid(graph_ph, idle_def, [], True, num_agents=0, tooltips=tips)
         else:
             result_ph_ref["ph"] = st.empty()
 
