@@ -1259,6 +1259,15 @@ def render_chat() -> None:
         color: #6b7280;
         margin-top: 8px;
     }
+    div[data-testid="stExpander"] {
+        border: 1px solid #bbf7d0;
+        border-radius: 16px;
+        background: #f0fdf4;
+        box-shadow: 0 4px 14px rgba(22, 163, 74, .08);
+    }
+    div[data-testid="stExpander"] summary {
+        color: #166534;
+    }
     </style>
     """, unsafe_allow_html=True)
 
