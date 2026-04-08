@@ -41,10 +41,10 @@ class _FakeRequest:
 
 
 class _FakeRequestWithSystem:
-    def __init__(self, system_message):
+    def __init__(self, system_message: str):
         self.system_message = system_message
 
-    def override(self, system_message):
+    def override(self, system_message: str):
         return _FakeRequestWithSystem(system_message)
 
 
@@ -107,14 +107,9 @@ class AsyncTaskCompletionMiddlewareTests(unittest.TestCase):
 
         result = mw.wrap_model_call(request, handler)
         self.assertEqual(result, "ok")
-        rendered = (
-            "".join(b.get("text", "") for b in seen["system"].content_blocks)
-            if hasattr(seen["system"], "content_blocks")
-            else str(seen["system"])
-        )
-        self.assertIn("BASE", rendered)
-        self.assertIn("complete within the same user turn", rendered)
-        self.assertIn(COMPLETION_POLICY_PROMPT.strip().splitlines()[0], rendered)
+        self.assertIn("BASE", seen["system"])
+        self.assertIn("complete within the same user turn", seen["system"])
+        self.assertIn(COMPLETION_POLICY_PROMPT.strip().splitlines()[0], seen["system"])
 
 
 if __name__ == "__main__":
