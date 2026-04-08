@@ -63,7 +63,7 @@ def _init_agent():
     with init_area.container():
         st.markdown(
             "<h2 style='text-align:center'>Danny's Coding AI Agent</h2>"
-            "<p style='text-align:center; color:#888'>Initializing...</p>",
+            "<p style='text-align:center; color:#888'>Loading...</p>",
             unsafe_allow_html=True,
         )
         progress = st.progress(0)
@@ -200,10 +200,6 @@ def _init_agent():
 
 def main():
     _init_state()
-    _init_agent()
-
-    if not st.session_state.initialized:
-        st.stop()
 
     # ── query_params 로 페이지 전환 감지 ─────────────────────────────
     qp = st.query_params
@@ -226,6 +222,11 @@ def main():
             unsafe_allow_html=True,
         )
     else:
+        _init_agent()
+
+        if not st.session_state.initialized:
+            st.stop()
+
         from coding_agent.webui._pages.chat import render_chat
         render_chat()
         # Chat 페이지 좌측 하단에 Settings 링크

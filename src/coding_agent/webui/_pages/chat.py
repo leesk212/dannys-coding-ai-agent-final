@@ -1204,11 +1204,11 @@ def render_chat() -> None:
             placeholder="Ask me anything about coding…",
         )
     with send_col:
-        # ★ Send: 실행 중이거나 입력이 비어있으면 비활성
+        # ★ Send: 실행 중일 때만 비활성. 빈 입력은 클릭 후 안내로 처리한다.
         send_clicked = st.button(
             "🚀 Send",
             use_container_width=True,
-            disabled=is_running or not (user_input or "").strip(),
+            disabled=is_running,
             type="primary",
         )
     with new_col:
@@ -1219,10 +1219,13 @@ def render_chat() -> None:
             disabled=is_running or not has_result,
             type="secondary",
         )
-    if send_clicked and user_input and user_input.strip():
-        st.session_state["_pending_prompt"] = user_input.strip()
-        st.session_state["_clear_prompt"] = True
-        st.rerun()
+    if send_clicked:
+        if user_input and user_input.strip():
+            st.session_state["_pending_prompt"] = user_input.strip()
+            st.session_state["_clear_prompt"] = True
+            st.rerun()
+        else:
+            st.info("메시지를 입력한 뒤 Send를 눌러주세요.")
     if new_chat_clicked:
         st.session_state["_has_result"] = False
         st.session_state["chat_messages"] = []
