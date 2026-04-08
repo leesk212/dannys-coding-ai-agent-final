@@ -533,6 +533,7 @@ def _stream_response(
     events: list[dict] = []  # 질의별 독립 이벤트 리스트
     step_count = 0
     t_start = time.time()
+    history_snapshot_saved = False
 
     # Local SubAgent tracking — 질의별 독립 (registry는 세션 공유이므로 사용하지 않음)
     tracked_agents: list[dict] = []
@@ -541,8 +542,36 @@ def _stream_response(
 
     # ── helpers ───────────────────────────────────────────
 
-    def _is_cancelled() -> bool:
+    def _is_refresh_requested() -> bool:
         return bool(st.session_state.get("_refresh_requested"))
+
+    def _is_stop_requested() -> bool:
+        return bool(st.session_state.get("_stop_requested"))
+
+    def _persist_history_snapshot(content: str, model: str, events_working: bool = False) -> None:
+        nonlocal history_snapshot_saved
+        if history_snapshot_saved:
+            return
+        final_agents = _agents_state()
+        final_mdef, final_tips = _build_mermaid(
+            final_agents,
+            events_working,
+            prompt,
+            result_text=content,
+            model_name=model,
+        )
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": content,
+            "model": model,
+            "tools_used": list(tools_used),
+            "activity_log": [(e["icon"], e["text"]) for e in events],
+            "mermaid_def": final_mdef,
+            "mermaid_tooltips": final_tips,
+            "mermaid_events": list(events),
+            "num_agents": len(final_agents),
+        })
+        history_snapshot_saved = True
 
     def _render_agent_status(text: str) -> None:
         """Show progress in the Agent bubble until actual model content arrives."""
@@ -778,8 +807,18 @@ def _stream_response(
             )
 
         for raw_chunk in stream:
-            if _is_cancelled():
+            if _is_refresh_requested():
                 _evt("🛑", "Refresh requested — stopping current run", "error", refresh=False)
+                return False
+            if _is_stop_requested():
+                _evt("🛑", "Stop requested — halting current run", "error", refresh=False)
+                if final_text:
+                    current_model = fallback_mw.current_model or current_model or "unknown"
+                    _refresh(False, result=final_text, model=current_model)
+                    _render_agent_answer(final_text, current_model)
+                    _persist_history_snapshot(final_text, current_model)
+                    return True
+                _refresh(False)
                 return False
 
             if isinstance(raw_chunk, tuple) and len(raw_chunk) == 3:
@@ -819,8 +858,18 @@ def _stream_response(
 
             step_count += 1
             for _node, node_output in chunk.items():
-                if _is_cancelled():
+                if _is_refresh_requested():
                     _evt("🛑", "Refresh requested — stopping current run", "error", refresh=False)
+                    return False
+                if _is_stop_requested():
+                    _evt("🛑", "Stop requested — halting current run", "error", refresh=False)
+                    if final_text:
+                        current_model = fallback_mw.current_model or current_model or "unknown"
+                        _refresh(False, result=final_text, model=current_model)
+                        _render_agent_answer(final_text, current_model)
+                        _persist_history_snapshot(final_text, current_model)
+                        return True
+                    _refresh(False)
                     return False
 
                 # Unwrap LangGraph Overwrite wrapper if present
@@ -881,14 +930,17 @@ def _stream_response(
                         if content and not tool_calls:
                             final_text = content
                             streamed_text = content
+                            current_model = fallback_mw.current_model or current_model or "unknown"
                             _evt(
                                 "💬",
                                 f"AI response received ({len(content):,} chars)",
                                 "done",
                                 refresh=False,
                             )
-                            _refresh(True, result=final_text, model=current_model)
-                            _render_agent_answer(final_text)
+                            _refresh(False, result=final_text, model=current_model)
+                            _render_agent_answer(final_text, current_model)
+                            _persist_history_snapshot(final_text, current_model)
+                            return True
 
                     elif msg_type == "tool":
                         tool_name = getattr(msg, "name", "unknown")
@@ -1014,24 +1066,7 @@ def _stream_response(
                 unsafe_allow_html=True,
             )
 
-        # Mermaid 최종 스냅샷 저장 (History 탭용)
-        final_agents = _agents_state()
-        final_mdef, final_tips = _build_mermaid(
-            final_agents, False, prompt,
-            result_text=final_text, model_name=current_model,
-        )
-
-        st.session_state.chat_messages.append({
-            "role": "assistant",
-            "content": final_text,
-            "model": current_model,
-            "tools_used": tools_used,
-            "activity_log": [(e["icon"], e["text"]) for e in events],
-            "mermaid_def": final_mdef,
-            "mermaid_tooltips": final_tips,
-            "mermaid_events": list(events),
-            "num_agents": len(final_agents),
-        })
+        _persist_history_snapshot(final_text, current_model)
         return True
 
     except Exception as e:
@@ -1088,6 +1123,7 @@ def render_chat() -> None:
     for k, v in [
         ("_is_running", False),
         ("_has_result", False),
+        ("_stop_requested", False),
     ]:
         if k not in st.session_state:
             st.session_state[k] = v
@@ -1314,6 +1350,14 @@ def render_chat() -> None:
             label_visibility="collapsed",
             placeholder="Ask me anything about coding…",
         )
+        stop_col_left, stop_col_right = st.columns([5, 1])
+        with stop_col_right:
+            stop_clicked = st.button(
+                "⏹ Stop",
+                use_container_width=True,
+                disabled=not is_running,
+                type="secondary",
+            )
     with action_col:
         # ★ Send: 실행 중일 때만 비활성. 빈 입력은 클릭 후 안내로 처리한다.
         send_clicked = st.button(
@@ -1322,6 +1366,8 @@ def render_chat() -> None:
             disabled=is_running,
             type="primary",
         )
+    refresh_row_left, refresh_row_right = st.columns([6, 1])
+    with refresh_row_right:
         refresh_clicked = st.button(
             "🔄 Refresh",
             use_container_width=True,
@@ -1334,8 +1380,12 @@ def render_chat() -> None:
             st.rerun()
         else:
             st.info("메시지를 입력한 뒤 Send를 눌러주세요.")
+    if stop_clicked:
+        st.session_state["_stop_requested"] = True
+        st.rerun()
     if refresh_clicked:
         st.session_state["_refresh_requested"] = True
+        st.session_state["_stop_requested"] = False
         st.session_state["_is_running"] = False
         st.session_state.pop("_pending_prompt", None)
         st.session_state["_has_result"] = False
@@ -1346,6 +1396,7 @@ def render_chat() -> None:
     # ── Pending prompt 실행 ───────────────────────────────
     if pending:
         st.session_state["_refresh_requested"] = False
+        st.session_state["_stop_requested"] = False
         st.session_state["_is_running"] = True
         completed = False
         try:
@@ -1353,5 +1404,6 @@ def render_chat() -> None:
         finally:
             st.session_state["_is_running"] = False
             st.session_state["_has_result"] = completed
+            st.session_state["_stop_requested"] = False
             # ★ 실행 완료 후 rerun → 입력창 활성화 + New Chat 활성화
             st.rerun()
