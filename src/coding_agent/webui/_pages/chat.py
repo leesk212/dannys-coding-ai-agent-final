@@ -198,7 +198,7 @@ def _build_mermaid(
             detail += f" {a['elapsed']}s"
 
         nid = f"S{i}"
-        label = f"{_esc(a['type'])}<br/><small>{detail}</small>"
+        label = f"{_esc(a['type'])} Agent<br/><small>{detail}</small>"
         lines.append(f'    {nid}["{label}"]')
 
         prompt_label = _edge_label(a.get("query", ""), f"{a['type']} task")
