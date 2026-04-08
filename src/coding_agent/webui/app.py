@@ -58,6 +58,17 @@ def _init_state():
             st.session_state[k] = v
 
 
+def _reset_chat_state() -> None:
+    st.session_state["_refresh_requested"] = True
+    st.session_state["_stop_requested"] = False
+    st.session_state["_is_running"] = False
+    st.session_state["_has_result"] = False
+    st.session_state["chat_messages"] = []
+    st.session_state["_prompt_area"] = ""
+    st.session_state["_clear_prompt"] = True
+    st.session_state.pop("_pending_prompt", None)
+
+
 def _init_agent():
     if st.session_state.agent_components is not None:
         return
@@ -210,6 +221,12 @@ def main():
         st.session_state.page = "settings"
     elif qp.get("page") == "chat" and st.session_state.page != "chat":
         st.session_state.page = "chat"
+    if qp.get("refresh") == "1":
+        _reset_chat_state()
+        st.session_state.page = "chat"
+        st.query_params.clear()
+        st.query_params["page"] = "chat"
+        st.rerun()
 
     # ── Page routing ─────────────────────────────────────────────────
     page = st.session_state.page
@@ -232,12 +249,17 @@ def main():
 
         from coding_agent.webui._pages.chat import render_chat
         render_chat()
-        # Chat 페이지 좌측 하단에 Settings 링크
+        # Chat 페이지 좌측 하단에 Settings/Refresh 링크
         st.markdown(
+            '<div style="position:fixed;bottom:1rem;left:1.2rem;'
+            'display:flex;gap:.9rem;align-items:center;z-index:9999;">'
             '<a href="?page=settings" target="_self" '
-            'style="position:fixed;bottom:1rem;left:1.2rem;'
-            'font-size:0.85rem;color:#64748b;text-decoration:none;z-index:9999;">'
-            '⚙️ Settings</a>',
+            'style="font-size:0.85rem;color:#64748b;text-decoration:none;">'
+            '⚙️ Settings</a>'
+            '<a href="?page=chat&refresh=1" target="_self" '
+            'style="font-size:0.85rem;color:#64748b;text-decoration:none;">'
+            '🔄 Refresh</a>'
+            '</div>',
             unsafe_allow_html=True,
         )
 

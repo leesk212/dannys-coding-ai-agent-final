@@ -1109,7 +1109,9 @@ def render_chat() -> None:
       │           👤 User prompt                              │
       ├──────────────────────────────────────────────────────┤
       │  📌 PROMPT 프리셋 버튼                                │
-      │  📝 입력창  │ 🚀 Send / 🔄 Refresh                  │
+      │  ┌──────────── Chat Input Card ───────────────┐      │
+      │  │  📝 입력창      ⏹ Stop      🚀 Send        │      │
+      │  └────────────────────────────────────────────┘      │
       └──────────────────────────────────────────────────────┘
     """
     comp = st.session_state.get("agent_components")
@@ -1338,10 +1340,8 @@ def render_chat() -> None:
                 st.session_state["_prompt_area"] = p
                 st.rerun()
 
-    # ── 질의 입력창 + Send/Refresh ───────────────────────
-    input_col, action_col = st.columns([6, 1])
-    with input_col:
-        # ★ 입력창: is_running일 때만 disabled (idle 상태에서는 항상 활성)
+    # ── 질의 입력창 카드 ──────────────────────────────────
+    with st.container(border=True):
         user_input = st.text_area(
             "prompt",
             key="_prompt_area",
@@ -1350,29 +1350,21 @@ def render_chat() -> None:
             label_visibility="collapsed",
             placeholder="Ask me anything about coding…",
         )
-        stop_col_left, stop_col_right = st.columns([5, 1])
-        with stop_col_right:
+        action_spacer, stop_col, send_col = st.columns([4, 1, 1])
+        with stop_col:
             stop_clicked = st.button(
                 "⏹ Stop",
                 use_container_width=True,
                 disabled=not is_running,
                 type="secondary",
             )
-    with action_col:
-        # ★ Send: 실행 중일 때만 비활성. 빈 입력은 클릭 후 안내로 처리한다.
-        send_clicked = st.button(
-            "🚀 Send",
-            use_container_width=True,
-            disabled=is_running,
-            type="primary",
-        )
-    refresh_row_left, refresh_row_right = st.columns([6, 1])
-    with refresh_row_right:
-        refresh_clicked = st.button(
-            "🔄 Refresh",
-            use_container_width=True,
-            type="secondary",
-        )
+        with send_col:
+            send_clicked = st.button(
+                "🚀 Send",
+                use_container_width=True,
+                disabled=is_running,
+                type="primary",
+            )
     if send_clicked:
         if user_input and user_input.strip():
             st.session_state["_pending_prompt"] = user_input.strip()
@@ -1382,15 +1374,6 @@ def render_chat() -> None:
             st.info("메시지를 입력한 뒤 Send를 눌러주세요.")
     if stop_clicked:
         st.session_state["_stop_requested"] = True
-        st.rerun()
-    if refresh_clicked:
-        st.session_state["_refresh_requested"] = True
-        st.session_state["_stop_requested"] = False
-        st.session_state["_is_running"] = False
-        st.session_state.pop("_pending_prompt", None)
-        st.session_state["_has_result"] = False
-        st.session_state["chat_messages"] = []
-        st.session_state["_clear_prompt"] = True
         st.rerun()
 
     # ── Pending prompt 실행 ───────────────────────────────
