@@ -1036,11 +1036,19 @@ def render_chat() -> None:
         # Show previous conversation pairs (history within session)
         # Layout: [💬 Result (left)] [👤 User (right)] → [🔍 Agent 동작 분석 (below)]
         _last_user_content = ""
+        _assistant_total = sum(
+            1 for msg in st.session_state.chat_messages
+            if msg["role"] == "assistant"
+        )
+        _assistant_idx = 0
         for msg in st.session_state.chat_messages:
             if msg["role"] == "user":
                 _last_user_content = msg["content"]
 
             elif msg["role"] == "assistant":
+                _assistant_idx += 1
+                _is_latest_assistant = _assistant_idx == _assistant_total
+
                 # ── Row: Agent bubble (left) + User bubble (right) ──
                 agent_col, user_col = st.columns([3, 2])
 
@@ -1071,7 +1079,7 @@ def render_chat() -> None:
                         tooltips=msg.get("mermaid_tooltips", {}),
                     )
                     _h = max(350, 220 + msg.get("num_agents", 0) * 70)
-                    with st.expander("🔍 Agent 동작 분석", expanded=False):
+                    with st.expander("🔍 Agent 동작 분석", expanded=_is_latest_assistant):
                         st.iframe(_hist_html, height=_h)
 
                 st.markdown("<hr style='border:none;border-top:1px solid #e2e8f0;margin:12px 0'>",
