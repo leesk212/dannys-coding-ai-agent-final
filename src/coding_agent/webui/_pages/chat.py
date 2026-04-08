@@ -1025,11 +1025,13 @@ def render_chat() -> None:
         border: 1px solid #bfdbfe;
         border-radius: 16px 16px 4px 16px;
         padding: 14px 18px;
-        margin: 6px 0;
+        margin: 0 0 8px auto;
+        max-width: 92%;
         font-size: 0.95em;
         color: #1e40af;
         line-height: 1.55;
         word-break: break-word;
+        box-shadow: 0 4px 14px rgba(59, 130, 246, .08);
     }
     .user-bubble-label {
         font-size: .75em;
@@ -1037,6 +1039,8 @@ def render_chat() -> None:
         color: #3b82f6;
         margin-bottom: 4px;
         letter-spacing: .3px;
+        text-align: right;
+        padding-right: .25rem;
     }
     /* Chat bubble styles — Agent (left, green) */
     .agent-bubble {
@@ -1044,20 +1048,24 @@ def render_chat() -> None:
         border: 1px solid #bbf7d0;
         border-radius: 16px 16px 16px 4px;
         padding: 14px 18px;
-        margin: 6px 0;
+        margin: 0 auto 8px 0;
+        max-width: 92%;
         font-size: 0.95em;
         color: #166534;
         line-height: 1.55;
         word-break: break-word;
         max-height: 500px;
         overflow-y: auto;
+        box-shadow: 0 4px 14px rgba(22, 163, 74, .08);
     }
     .agent-bubble-label {
         font-size: .75em;
         font-weight: 700;
         color: #16a34a;
         margin-bottom: 4px;
+        margin-top: 22px;
         letter-spacing: .3px;
+        padding-left: .25rem;
     }
     .agent-bubble-model {
         font-size: .7em;

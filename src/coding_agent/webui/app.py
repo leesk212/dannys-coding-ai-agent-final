@@ -35,6 +35,9 @@ st.markdown("""
     footer {visibility: hidden;}
     [data-testid="stStatusWidget"] {visibility: hidden;}
     [data-testid="stDecoration"] {display: none;}
+    [data-testid="stToolbar"] {display: none !important;}
+    [data-testid="stDeployButton"] {display: none !important;}
+    .stDeployButton {display: none !important;}
     /* Sidebar completely hidden */
     [data-testid="stSidebar"] {display:none !important;}
 </style>
