@@ -540,6 +540,17 @@ def _stream_response(
 
     # ── helpers ───────────────────────────────────────────
 
+    def _render_agent_status(text: str) -> None:
+        """Show progress in the Agent bubble until actual model content arrives."""
+        if final_text:
+            return
+        result_ph.markdown(
+            "<div class='agent-bubble'>"
+            f"{text}<div class='agent-bubble-model'>Working...</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
     def _tool_call_value(tool_call, key: str, default=None):
         if isinstance(tool_call, dict):
             return tool_call.get(key, default)
@@ -565,6 +576,7 @@ def _stream_response(
     def _evt(icon: str, text: str, css: str = "", refresh: bool = True) -> None:
         ts = time.strftime("%H:%M:%S")
         events.append({"icon": icon, "text": text, "css_class": css, "time": ts})
+        _render_agent_status(f"{icon} {text}")
         if refresh:
             _refresh(True)
 
@@ -987,6 +999,8 @@ def render_chat() -> None:
 
     # Pending prompt: set by Send button, consumed this render cycle
     pending = st.session_state.pop("_pending_prompt", None)
+    if pending:
+        st.session_state["_is_running"] = True
     is_running = st.session_state["_is_running"]
 
     # 전송 후 입력창 비우기 — 위젯 렌더링 전에 처리해야 함
@@ -1167,6 +1181,13 @@ def render_chat() -> None:
                     unsafe_allow_html=True,
                 )
                 result_ph_ref["ph"] = st.empty()
+                if pending or is_running:
+                    result_ph_ref["ph"].markdown(
+                        "<div class='agent-bubble'>"
+                        "Thinking...<div class='agent-bubble-model'>Waiting for model output</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
         else:
             result_ph_ref["ph"] = st.empty()
 
