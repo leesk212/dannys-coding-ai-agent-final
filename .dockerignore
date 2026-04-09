@@ -10,6 +10,4 @@ htmlcov
 .env
 .codex
 :memory:
-builtins.html
-deepagents_sourcecode
 workspace
