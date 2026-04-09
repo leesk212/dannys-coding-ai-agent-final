@@ -36,9 +36,22 @@ class LazyAsyncSubagentsMiddleware(AgentMiddleware):
         if self._runtime.topology != "split":
             return None
 
+        task_summary = str(args.get("description", "") or "").strip()
+        self._runtime.begin_task(subagent_type, task_summary or "(no task summary)")
         try:
             self._runtime.ensure_started(subagent_type)
+            self._runtime.note_runtime_state(
+                subagent_type,
+                state="running",
+                task_summary=task_summary,
+            )
         except Exception as exc:  # noqa: BLE001
+            self._runtime.note_runtime_state(
+                subagent_type,
+                state="failed",
+                task_summary=task_summary,
+                error=str(exc),
+            )
             return ToolMessage(
                 content=f"Failed to prepare async subagent `{subagent_type}`: {exc}",
                 name="start_async_task",

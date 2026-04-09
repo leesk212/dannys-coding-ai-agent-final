@@ -24,6 +24,7 @@ import httpx
 from deepagents import AsyncSubAgent
 
 from coding_agent.config import Settings, settings
+from coding_agent.state.store import DurableStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,71 @@ DEFAULT_ASYNC_SUBAGENTS: dict[str, dict[str, Any]] = {
 }
 
 
+def _read_async_subagent_section(config_path: Path | None = None) -> dict[str, Any]:
+    """Read the raw `[async_subagents]` section from `config.toml`.
+
+    This keeps config parsing separate from runtime enrichment so the code path
+    can mirror the DeepAgents CLI reference more closely.
+    """
+    if config_path is None:
+        config_path = Path.home() / ".deepagents" / "config.toml"
+
+    if not config_path.exists():
+        return {}
+
+    try:
+        with config_path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, PermissionError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Could not read async subagent config from %s: %s", config_path, exc)
+        return {}
+
+    section = data.get("async_subagents")
+    return section if isinstance(section, dict) else {}
+
+
+def load_async_subagent_specs(config_path: Path | None = None) -> list[AsyncSubAgent]:
+    """Load DeepAgents-style `AsyncSubAgent` specs from `config.toml`.
+
+    Expected format:
+
+    ```toml
+    [async_subagents.researcher]
+    description = "Research agent"
+    graph_id = "researcher"
+    url = "http://127.0.0.1:30240"
+    headers = { Authorization = "Bearer ..." }
+    ```
+    """
+    section = _read_async_subagent_section(config_path)
+    required = {"description", "graph_id"}
+    specs: list[AsyncSubAgent] = []
+    for name, raw_spec in section.items():
+        if not isinstance(raw_spec, dict):
+            logger.warning("Skipping async subagent %r: expected table", name)
+            continue
+        missing = required - raw_spec.keys()
+        if missing:
+            logger.warning("Skipping async subagent %r: missing fields %s", name, missing)
+            continue
+        description = str(raw_spec.get("description", "")).strip()
+        graph_id = str(raw_spec.get("graph_id", "")).strip()
+        if not description or not graph_id:
+            logger.warning("Skipping async subagent %r: invalid description/graph_id", name)
+            continue
+        spec = AsyncSubAgent(
+            name=name,
+            description=description,
+            graph_id=graph_id,
+        )
+        if "url" in raw_spec and isinstance(raw_spec.get("url"), str) and str(raw_spec["url"]).strip():
+            spec["url"] = str(raw_spec["url"]).strip()
+        if "headers" in raw_spec and isinstance(raw_spec.get("headers"), dict):
+            spec["headers"] = dict(raw_spec["headers"])
+        specs.append(spec)
+    return specs
+
+
 def load_async_subagents(config_path: Path | None = None) -> dict[str, dict[str, Any]]:
     """Load optional async subagent overrides from `config.toml`.
 
@@ -85,42 +151,25 @@ def load_async_subagents(config_path: Path | None = None) -> dict[str, dict[str,
     model = "openrouter:qwen/qwen3.5-35b-a3b"
     ```
     """
-    if config_path is None:
-        config_path = Path.home() / ".deepagents" / "config.toml"
-
-    if not config_path.exists():
-        return {}
-
-    try:
-        with config_path.open("rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, PermissionError, tomllib.TOMLDecodeError) as exc:
-        logger.warning("Could not read async subagent config from %s: %s", config_path, exc)
-        return {}
-
-    section = data.get("async_subagents")
-    if not isinstance(section, dict):
-        return {}
-
+    section = _read_async_subagent_section(config_path)
+    base_specs = {spec["name"]: spec for spec in load_async_subagent_specs(config_path)}
     loaded: dict[str, dict[str, Any]] = {}
     for name, raw_spec in section.items():
         if not isinstance(raw_spec, dict):
-            logger.warning("Skipping async subagent %r: expected table", name)
             continue
-        description = str(raw_spec.get("description", "")).strip()
-        if not description:
-            logger.warning("Skipping async subagent %r: missing non-empty description", name)
+        base_spec = base_specs.get(name)
+        if base_spec is None:
             continue
         loaded[name] = {
-            "description": description,
+            "description": str(base_spec["description"]).strip(),
             "system_prompt": str(raw_spec.get("system_prompt", "")).strip(),
-            "graph_id": str(raw_spec.get("graph_id", name)).strip() or name,
+            "graph_id": str(base_spec["graph_id"]).strip() or name,
             "transport": str(raw_spec.get("transport", "http")).strip().lower() or "http",
-            "url": str(raw_spec.get("url", "")).strip() or None,
+            "url": str(base_spec.get("url", "")).strip() or None,
             "host": str(raw_spec.get("host", "")).strip() or None,
             "port": int(raw_spec["port"]) if raw_spec.get("port") is not None else None,
             "model": str(raw_spec.get("model", "")).strip() or None,
-            "headers": dict(raw_spec.get("headers", {})) if isinstance(raw_spec.get("headers"), dict) else {},
+            "headers": dict(base_spec.get("headers", {})) if isinstance(base_spec.get("headers"), dict) else {},
         }
     return loaded
 
@@ -189,9 +238,15 @@ class LocalAsyncSubagentManager:
         self.topology = (topology or self.cfg.deployment_topology or "single").strip().lower()
         loaded = load_async_subagents()
         self._subagents = self._merge_subagents(DEFAULT_ASYNC_SUBAGENTS, loaded, subagents or {})
+        self._state_store = DurableStateStore(self.cfg.state_dir / "agent_state.db")
         self._processes: dict[str, LocalAsyncSubagentProcess] = {}
+        self._pending_lifecycle_ids: dict[str, list[str]] = {}
         self._events: list[dict[str, Any]] = []
         self._shutdown_registered = False
+
+    @property
+    def state_store(self) -> DurableStateStore:
+        return self._state_store
 
     def _emit_event(self, event_type: str, spec: LocalAsyncSubagentProcess, **extra: Any) -> None:
         self._events.append(
@@ -207,6 +262,63 @@ class LocalAsyncSubagentManager:
                 "time": time.time(),
                 **extra,
             }
+        )
+
+    def begin_task(self, role: str, task_summary: str, parent_id: str = "main-agent") -> str:
+        agent_id = self._state_store.create_subagent(
+            role=role,
+            task_summary=task_summary,
+            parent_id=parent_id,
+            metadata={"topology": self.topology},
+        )
+        self._state_store.update_subagent(
+            agent_id,
+            state="assigned",
+            event_detail=task_summary,
+        )
+        self._pending_lifecycle_ids.setdefault(role, []).append(agent_id)
+        return agent_id
+
+    def _pop_pending_lifecycle_id(self, role: str) -> str | None:
+        pending = self._pending_lifecycle_ids.get(role) or []
+        return pending.pop(0) if pending else None
+
+    def bind_task(self, task_id: str, *, role: str | None = None, run_id: str | None = None) -> str | None:
+        row = self._state_store.find_subagent_by_task_id(task_id)
+        if row:
+            agent_id = str(row["agent_id"])
+        else:
+            if not role:
+                return None
+            agent_id = self._pop_pending_lifecycle_id(role)
+            if not agent_id:
+                return None
+        self._state_store.update_subagent(
+            agent_id,
+            task_id=task_id,
+            run_id=run_id,
+            state="running",
+            event_detail=f"task_id={task_id}",
+        )
+        return agent_id
+
+    def update_task_state(
+        self,
+        *,
+        task_id: str,
+        state: str,
+        detail: str = "",
+        run_id: str | None = None,
+    ) -> None:
+        row = self._state_store.find_subagent_by_task_id(task_id)
+        if not row:
+            return
+        self._state_store.update_subagent(
+            str(row["agent_id"]),
+            state=state,
+            run_id=run_id,
+            error=detail if state in {"failed", "blocked"} else None,
+            event_detail=detail,
         )
 
     @staticmethod
@@ -394,7 +506,29 @@ class LocalAsyncSubagentManager:
         return events
 
     def shutdown_turn_subagents(self) -> None:
+        for row in self.list_subagent_records():
+            if row.get("state") in {"running", "assigned", "blocked", "completed", "failed", "cancelled"}:
+                self._state_store.update_subagent(str(row["agent_id"]), state="destroyed", event_detail="turn cleanup")
         self.shutdown_all()
+
+    def note_runtime_state(self, role: str, *, state: str, task_summary: str = "", error: str = "") -> None:
+        pending = self._pending_lifecycle_ids.get(role) or []
+        agent_id = pending[0] if pending else None
+        if not agent_id:
+            return
+        self._state_store.update_subagent(
+            agent_id,
+            state=state,
+            endpoint=f"127.0.0.1:{self._ensure_spec(role).port}",
+            pid=self._ensure_spec(role).pid,
+            model=self._ensure_spec(role).model,
+            error=error or None,
+            task_summary=task_summary or None,
+            event_detail=error or task_summary,
+        )
+
+    def list_subagent_records(self, parent_id: str | None = None) -> list[dict[str, Any]]:
+        return self._state_store.list_subagents(parent_id)
 
     def build_async_subagents(self) -> list[AsyncSubAgent]:
         """Return the actual DeepAgents AsyncSubAgent specs."""
@@ -431,6 +565,7 @@ class LocalAsyncSubagentManager:
             "port": spec.port,
             "url": spec.url,
             "pid": spec.pid,
+            "model": spec.model,
             "external": spec.external,
             "status": spec.status(),
         }

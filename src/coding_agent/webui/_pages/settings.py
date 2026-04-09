@@ -198,10 +198,21 @@ def render_settings() -> None:
     st.markdown("---")
 
     # Re-initialize agent
-    if st.button("🔄 Reinitialize Agent", type="primary"):
+    col_reinit, col_refresh = st.columns(2)
+    with col_reinit:
+        reinit_clicked = st.button("Reinitialize Agent", type="primary", use_container_width=True)
+    with col_refresh:
+        refresh_clicked = st.button("Refresh Chat", use_container_width=True)
+
+    if reinit_clicked:
         st.session_state.agent_components = None
         st.session_state.initialized = False
         st.success("Agent will be reinitialized on next page load.")
+        st.rerun()
+    if refresh_clicked:
+        st.query_params.clear()
+        st.query_params["page"] = "chat"
+        st.query_params["refresh"] = "1"
         st.rerun()
 
     # Current status

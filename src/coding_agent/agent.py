@@ -1,9 +1,17 @@
-"""DeepAgents v0.5-style agent assembly for the Coding AI Agent."""
+"""DeepAgents v0.5-style agent assembly for the Coding AI Agent.
+
+This module intentionally mirrors the DeepAgents CLI composition style:
+- load and normalize AsyncSubAgent specs first
+- build a clear middleware stack
+- build a concrete system prompt from runtime context
+- assemble `create_deep_agent(...)` last
+"""
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +24,12 @@ from coding_agent.middleware.async_task_completion import AsyncTaskCompletionMid
 from coding_agent.middleware.lazy_async_subagents import LazyAsyncSubagentsMiddleware
 from coding_agent.middleware.long_term_memory import LongTermMemoryMiddleware
 from coding_agent.middleware.model_fallback import ModelFallbackMiddleware
+from coding_agent.middleware.subagent_lifecycle import SubAgentLifecycleMiddleware
 
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are Danny's Coding AI Agent, a software engineering supervisor built with DeepAgents.
+BASE_SYSTEM_PROMPT = """You are Danny's Coding AI Agent, a software engineering supervisor built with DeepAgents.
 
 ## Core Architecture
 - You are the main supervisor agent created with `create_deep_agent`.
@@ -44,6 +53,42 @@ SYSTEM_PROMPT = """You are Danny's Coding AI Agent, a software engineering super
 - Use `memory_search` before starting work when prior project context may help.
 - Use `memory_store` for durable preferences, patterns, and architecture decisions.
 """
+
+
+def build_system_prompt(
+    *,
+    cfg: Settings,
+    cwd: Path,
+    topology: str,
+    async_subagents: list[AsyncSubAgent],
+) -> str:
+    """Build a runtime-aware system prompt, similar to DeepAgents CLI."""
+    model_identity = cfg.primary_model_string
+    subagent_lines = []
+    for spec in async_subagents:
+        line = f"- `{spec['name']}` -> graph_id=`{spec['graph_id']}`"
+        if spec.get("url"):
+            line += f", url=`{spec['url']}`"
+        else:
+            line += ", transport=`asgi`"
+        subagent_lines.append(line)
+    subagent_block = "\n".join(subagent_lines) if subagent_lines else "- No async subagents configured"
+
+    return (
+        f"{BASE_SYSTEM_PROMPT}\n\n"
+        "## Runtime Context\n"
+        f"- Deployment topology: `{topology}`\n"
+        f"- Working directory: `{cwd}`\n"
+        f"- Primary model: `{model_identity}`\n"
+        f"- OpenRouter enabled: `{cfg.has_openrouter}`\n\n"
+        "## Registered AsyncSubAgents\n"
+        f"{subagent_block}\n\n"
+        "## Execution Rules\n"
+        "- Prefer async subagents for parallelizable or specialized work.\n"
+        "- Use only the information required by each subagent; do not forward full chat history blindly.\n"
+        "- If a subagent fails or blocks, collect the latest state and either recover or stop safely.\n"
+        "- Keep file paths absolute and scoped to the current working directory.\n"
+    )
 
 
 class AgentLoopGuard:
@@ -112,11 +157,14 @@ def create_coding_agent(
     cwd: Path | None = None,
     *,
     topology: str | None = None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Create the main supervisor with DeepAgents AsyncSubAgent specs."""
 
     cfg = custom_settings or settings
     working_dir = (cwd or Path.cwd()).resolve()
+    if progress_cb:
+        progress_cb(f"Preparing local coding agent (topology={topology or cfg.deployment_topology}, cwd={working_dir})")
 
     try:
         from deepagents.backends import LocalShellBackend
@@ -127,22 +175,44 @@ def create_coding_agent(
             "Install the updated dependencies from pyproject.toml."
         ) from exc
 
+    if progress_cb:
+        progress_cb("Creating model fallback middleware")
     fallback_mw = ModelFallbackMiddleware(
         models=cfg.get_all_models(),
         timeout=cfg.model_timeout,
     )
+    if progress_cb:
+        progress_cb("Creating long-term memory middleware")
     ltm_mw = LongTermMemoryMiddleware(memory_dir=str(cfg.memory_dir))
+    if progress_cb:
+        progress_cb("Creating async-only and lifecycle middleware")
     async_only_mw = AsyncOnlySubagentsMiddleware()
     subagent_runtime = LocalAsyncSubagentManager(
         cfg=cfg,
         root_dir=working_dir,
         topology=topology,
     )
+    if progress_cb:
+        progress_cb("Creating lazy async subagent runtime manager")
     lazy_async_mw = LazyAsyncSubagentsMiddleware(subagent_runtime)
+    subagent_lifecycle_mw = SubAgentLifecycleMiddleware(subagent_runtime)
     completion_mw = AsyncTaskCompletionMiddleware()
     loop_guard = AgentLoopGuard(max_iterations=cfg.max_iterations)
 
+    if progress_cb:
+        progress_cb("Building AsyncSubAgent specs")
     async_subagents: list[AsyncSubAgent] = subagent_runtime.build_async_subagents()
+    if progress_cb:
+        progress_cb(f"AsyncSubAgent specs ready: {', '.join(spec.get('name', '?') for spec in async_subagents)}")
+        progress_cb(f"Building runtime-aware system prompt (cwd={working_dir})")
+    system_prompt = build_system_prompt(
+        cfg=cfg,
+        cwd=working_dir,
+        topology=subagent_runtime.topology,
+        async_subagents=async_subagents,
+    )
+    if progress_cb:
+        progress_cb("Creating checkpointer and shell backend")
     checkpointer = MemorySaver()
     backend = LocalShellBackend(
         root_dir=str(working_dir),
@@ -150,10 +220,12 @@ def create_coding_agent(
         virtual_mode=False,
     )
 
+    if progress_cb:
+        progress_cb("Assembling DeepAgents supervisor graph")
     agent = create_deep_agent(
         model=fallback_mw.get_model_with_fallback(),
-        system_prompt=SYSTEM_PROMPT,
-        middleware=[fallback_mw, ltm_mw, async_only_mw, lazy_async_mw, completion_mw],
+        system_prompt=system_prompt,
+        middleware=[fallback_mw, ltm_mw, async_only_mw, lazy_async_mw, subagent_lifecycle_mw, completion_mw],
         tools=ltm_mw.get_tools(),
         subagents=async_subagents,
         memory=_setup_agents_md(),
@@ -163,6 +235,8 @@ def create_coding_agent(
         debug=False,
         name="coding-ai-agent",
     )
+    if progress_cb:
+        progress_cb("DeepAgents supervisor graph assembled")
 
     logger.info(
         "Created DeepAgents supervisor with %d AsyncSubAgent specs",
@@ -177,6 +251,7 @@ def create_coding_agent(
         "subagent_middleware": subagent_runtime,
         "subagent_manager": subagent_runtime,
         "subagent_runtime": subagent_runtime,
+        "state_store": subagent_runtime.state_store,
         "deployment_topology": subagent_runtime.topology,
         "async_subagents": async_subagents,
         "async_task_tracker": AsyncTaskTracker(agent),

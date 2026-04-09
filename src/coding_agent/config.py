@@ -76,6 +76,11 @@ class Settings:
             os.path.expanduser(os.getenv("MEMORY_DIR", "~/.coding_agent/memory"))
         )
     )
+    state_dir: Path = field(
+        default_factory=lambda: Path(
+            os.path.expanduser(os.getenv("STATE_DIR", "~/.coding_agent/state"))
+        )
+    )
 
     # Sub-agents
     max_subagents: int = field(

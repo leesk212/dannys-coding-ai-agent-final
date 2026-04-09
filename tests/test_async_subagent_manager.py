@@ -6,6 +6,7 @@ from pathlib import Path
 
 from coding_agent.async_subagent_manager import (
     LocalAsyncSubagentManager,
+    load_async_subagent_specs,
     load_async_subagents,
 )
 
@@ -51,6 +52,28 @@ transport = "asgi"
         self.assertEqual(loaded["researcher"]["description"], "Research override")
         self.assertEqual(loaded["researcher"]["graph_id"], "research-v2")
         self.assertEqual(loaded["researcher"]["transport"], "asgi")
+
+    def test_load_async_subagent_specs_reads_reference_style_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[async_subagents.researcher]
+description = "Research override"
+graph_id = "research-v2"
+url = "http://127.0.0.1:31111"
+headers = { Authorization = "Bearer demo" }
+                """.strip(),
+                encoding="utf-8",
+            )
+            loaded = load_async_subagent_specs(config_path)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0]["name"], "researcher")
+        self.assertEqual(loaded[0]["description"], "Research override")
+        self.assertEqual(loaded[0]["graph_id"], "research-v2")
+        self.assertEqual(loaded[0]["url"], "http://127.0.0.1:31111")
+        self.assertEqual(loaded[0]["headers"]["Authorization"], "Bearer demo")
 
 
 if __name__ == "__main__":

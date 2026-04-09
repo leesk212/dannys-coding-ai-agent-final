@@ -58,6 +58,8 @@ def _reset_chat_state() -> None:
     st.session_state["_clear_prompt"] = True
     st.session_state["_conversation_thread_id"] = f"webui-{uuid.uuid4().hex}"
     st.session_state.pop("_pending_prompt", None)
+    st.session_state.pop("_live_turn_state", None)
+    st.session_state.pop("_mermaid_render_seq", None)
 
 
 def _init_agent():
@@ -91,6 +93,11 @@ def _init_agent():
             log("🔑", f"API Key: {key_ok}", 15)
             models = settings.get_all_models()
             log("🧪", f"Models: {len(models)} configured", 20)
+            log("📂", f"Working directory: {Path.cwd()}", 22)
+            log("🗃️", f"Memory directory: {settings.memory_dir}", 24)
+            log("🗄️", f"State store path: {settings.state_dir / 'agent_state.db'}", 26)
+            primary_model = getattr(settings, "primary_model_string", "") or "unknown"
+            log("🤖", f"Primary model: {primary_model}", 28)
 
             t0 = time.time()
             log("🧠", "Initializing ChromaDB memory...", 35)
@@ -103,15 +110,21 @@ def _init_agent():
             t0 = time.time()
             log("🏗️", "Creating DeepAgents supervisor...", 55)
             from coding_agent.runtime import create_runtime_components
-            components = create_runtime_components(cwd=Path.cwd())
+            components = create_runtime_components(
+                cwd=Path.cwd(),
+                progress_cb=lambda msg: log("   ", msg, 70),
+            )
             log("✅", f"DeepAgents supervisor ready — {time.time()-t0:.1f}s", 90)
             topo = components.get("deployment_topology", "unknown")
             log("🧭", f"Topology: {topo}", 91)
+            async_specs = components.get("async_subagents") or []
+            spec_names = ", ".join(str(spec.get("name", "?")) for spec in async_specs) or "none"
+            log("🧩", f"AsyncSubAgent specs: {spec_names}", 92)
 
             t0 = time.time()
             manager = components["subagent_runtime"]
             summary = manager.topology_summary()
-            log("🤖", "Configuring AsyncSubAgent runtime policy...", 92)
+            log("🤖", "Configuring AsyncSubAgent runtime policy...", 93)
             if summary["topology"] == "split":
                 log(
                     "⏳",
@@ -119,8 +132,18 @@ def _init_agent():
                         "Split topology enabled: subagent processes will launch "
                         "on demand when MainAgent calls start_async_task"
                     ),
-                    95,
+                    94,
                 )
+                for name in sorted(spec["name"] for spec in async_specs):
+                    try:
+                        info = manager.get_runtime_info(name)
+                        log(
+                            "   ",
+                            f"{name}: prepared at {info.get('host', '127.0.0.1')}:{info.get('port', '')} (spawn on demand)",
+                            95,
+                        )
+                    except Exception:
+                        log("   ", f"{name}: runtime metadata unavailable yet", 95)
             else:
                 log(
                     "🧩",
@@ -185,7 +208,7 @@ def main():
             '<a href="?page=chat" target="_self" '
             'style="position:fixed;bottom:1rem;left:1.2rem;'
             'font-size:0.85rem;color:#64748b;text-decoration:none;z-index:9999;">'
-            '💬 Back to Chat</a>',
+            'Back to Chat</a>',
             unsafe_allow_html=True,
         )
     else:
@@ -202,10 +225,7 @@ def main():
             'display:flex;gap:.9rem;align-items:center;z-index:9999;">'
             '<a href="?page=settings" target="_self" '
             'style="font-size:0.85rem;color:#64748b;text-decoration:none;">'
-            '⚙️ Settings</a>'
-            '<a href="?page=chat&refresh=1" target="_self" '
-            'style="font-size:0.85rem;color:#64748b;text-decoration:none;">'
-            '🔄 Refresh</a>'
+            'Settings</a>'
             '</div>',
             unsafe_allow_html=True,
         )

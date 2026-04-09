@@ -26,7 +26,10 @@ import uuid
 
 import httpx
 import streamlit as st
+import streamlit.components.v1 as components
 from langchain_core.messages import HumanMessage
+
+from coding_agent.resilience import get_policy
 
 logger = logging.getLogger(__name__)
 
@@ -36,26 +39,73 @@ AGENT_ICONS = {
 }
 
 TEST_PROMPTS = {
-    "Async Launch": (
-        "Launch two async tasks: "
-        "1) a researcher to investigate best practices for Python error handling, "
-        "2) a coder to draft an example implementation. "
-        "Report the task IDs and stop after launching."
+    "User/Profile": (
+        "장기 메모리 테스트다. 다음 사용자 선호를 user/profile 계층에 저장하고, "
+        "바로 다시 조회해서 이후 응답 형식에 어떻게 반영할지 설명해라. "
+        "규칙: 출력은 항상 한국어 설명 + 영어 코드, Python 스타일을 선호한다."
     ),
-    "Memory Test": (
-        "Remember that I prefer Python type hints and Google-style docstrings. "
-        "Then search memory to confirm it was saved."
+    "Project/Context": (
+        "장기 메모리 테스트다. 다음 프로젝트 규칙을 project/context 계층에 저장하고 다시 조회해라. "
+        "규칙: 모든 공개 Python 함수에는 타입 힌트가 필요하고, pytest를 사용하며, "
+        "pydantic은 금지한다. 이후 이 규칙이 코드 생성에 어떻게 반영되는지 설명해라."
     ),
-    "Async Collect": (
-        "If there are any completed async tasks in this conversation, collect their results and summarize them. "
-        "If not, list the tracked async tasks."
+    "Domain Knowledge": (
+        "장기 메모리 테스트다. 다음 도메인 지식을 domain/knowledge 계층에 저장하고, "
+        "같은 응답에서 다시 검색해라. 규칙: 고객 등급 Silver는 환불 수수료 0%, "
+        "Gold는 0%, Bronze는 10%다. 그리고 이 규칙을 결제/환불 로직 생성 시 어떻게 재사용할지 설명해라."
+    ),
+    "Memory Correction": (
+        "메모리 정정 테스트다. domain/knowledge 에서 Silver 환불 규칙을 찾아서 "
+        "이제 Silver는 환불 수수료 5%로 바뀌었다고 정정하고, 정정 전/후 차이를 요약해라."
+    ),
+    "SubAgent Lifecycle": (
+        "동적 SubAgent 수명주기 테스트다. 하나의 사용자 질의 안에서 researcher subagent와 coder subagent를 "
+        "동적으로 생성해서 실행하고, 완료될 때까지 기다린 뒤, 각 subagent의 상태 전이 "
+        "created -> assigned -> running -> completed/destroyed 를 요약해라."
     ),
     "Code+Review Test": (
-        "Launch two async tasks, collect their completed results in this same response, and synthesize final output: "
-        "1) coder to implement a fibonacci function with type hints and docstring, "
-        "2) reviewer to review correctness, edge cases, and test coverage gaps."
+        "Handle this in one user turn. Launch two async tasks: "
+        "1) a coder subagent to implement a fibonacci function with type hints, "
+        "2) a reviewer subagent to review correctness, edge cases, and missing tests. "
+        "Wait for both to finish, collect the completed results in the same response, and synthesize one final answer."
     ),
-    "Fallback Test": "Write a simple hello world in Python",
+    "Blocked/Failed": (
+        "SubAgent 예외 처리 테스트다. 일부러 모호한 작업을 coder subagent에 맡기고, "
+        "blocked 또는 failed 상태가 감지되면 대체 경로를 사용해라. "
+        "최종적으로 어떤 상태 전이가 있었는지와 어떤 대체 역할을 사용했는지 요약해라."
+    ),
+    "Loop Safety": (
+        "Agentic loop 복원력 테스트다. 다음 4가지를 짧게 점검해라: "
+        "모델 timeout, 반복 무진전, tool call 오류, safe stop. "
+        "각 항목마다 감지 신호, 재시도 여부, fallback 여부, stop 조건을 설명해라."
+    ),
+    "Model Policy": (
+        "모델 정책 증빙 테스트다. 현재 사용 중인 모델 식별자를 말하고, "
+        "OpenRouter 우선 사용 여부, fallback 모델, tool calling/긴 문맥/모델 전환 제약을 요약해라."
+    ),
+}
+
+TEST_PROMPT_DETAILS = {
+    "User/Profile": "장기 메모리 `user/profile` 저장, 조회, 재주입 경로를 검증합니다.",
+    "Project/Context": "장기 메모리 `project/context` 저장과 이후 코드 생성 규칙 반영을 검증합니다.",
+    "Domain Knowledge": "장기 메모리 `domain/knowledge` 누적 저장과 이후 재사용 경로를 검증합니다.",
+    "Memory Correction": "잘못된 장기 메모리를 정정하고 최신 근거로 교체하는 정책을 검증합니다.",
+    "SubAgent Lifecycle": "동적 SubAgent 생성, 상태 전이, 종료 정리까지의 lifecycle 기록을 검증합니다.",
+    "Code+Review Test": "동시 async subagent 실행 후 한 응답 안에서 결과를 취합하는지 검증합니다.",
+    "Blocked/Failed": "blocked 또는 failed 상태 감지와 alternate path 정책을 검증합니다.",
+    "Loop Safety": "timeout, 무진전, tool 오류, safe stop 같은 복원력 정책을 검증합니다.",
+    "Model Policy": "현재 모델, fallback, 제약사항이 설명 가능한지 검증합니다.",
+}
+
+BLOCKED_AFTER_SECONDS = 45.0
+SUBAGENT_POLL_INTERVAL_SECONDS = 0.25
+SUBAGENT_RUN_POLL_TIMEOUT_SECONDS = 0.2
+ALTERNATE_ROLE_POLICY = {
+    "coder": "debugger",
+    "debugger": "reviewer",
+    "researcher": "reviewer",
+    "reviewer": "coder",
+    "general": "reviewer",
 }
 
 
@@ -142,6 +192,16 @@ def _escape_bubble_html(text: str) -> str:
 
 def _bubble_width_style(text: str, role: str) -> str:
     """Return a width style that loosely tracks message length."""
+    width = _bubble_width_percent(text)
+    if role == "user":
+        margin = "margin:0 0 8px auto;"
+    else:
+        margin = "margin:0 auto 8px 0;"
+    return f"display:inline-block;width:fit-content;max-width:{width}%;{margin}"
+
+
+def _bubble_width_percent(text: str) -> int:
+    """Return a rough width percentage for chat/analysis alignment."""
     plain = re.sub(r"\s+", " ", (text or "").replace("<br>", "\n")).strip()
     lines = max(1, plain.count("\n") + 1)
     length = len(plain)
@@ -157,11 +217,18 @@ def _bubble_width_style(text: str, role: str) -> str:
         width = 86
     if lines >= 4:
         width = min(90, width + 8)
+    return width
+
+
+def _bubble_wrap_open(role: str) -> str:
     if role == "user":
-        margin = "margin:0 0 8px auto;"
-    else:
-        margin = "margin:0 auto 8px 0;"
-    return f"display:inline-block;width:fit-content;max-width:{width}%;{margin}"
+        return "<div style='width:100%;text-align:right'>"
+    return "<div style='width:100%;text-align:left'>"
+
+
+def _analysis_column_weights(text: str) -> list[float]:
+    width = _bubble_width_percent(text)
+    return [float(width), float(max(8, 100 - width))]
 
 
 def _edge_label(text: str, fallback: str, limit: int = 28) -> str:
@@ -235,9 +302,18 @@ def _build_mermaid(
             detail += f" {a['task_id'][:8]}"
         if a.get("elapsed"):
             detail += f" {a['elapsed']}s"
+        endpoint = _clean_label_text(str(a.get("endpoint", "") or ""))
+        pid = str(a.get("pid", "") or "").strip()
+        model = _clean_label_text(str(a.get("model", "") or ""))
 
         nid = f"S{i}"
         label = f"{_esc(a['type'])} Agent<br/><small>{detail}</small>"
+        if endpoint:
+            label += f"<br/><small>{_esc(endpoint)}</small>"
+        if pid:
+            label += f"<br/><small>pid {_esc(pid)}</small>"
+        if model:
+            label += f"<br/><small>{_esc(model[:28])}</small>"
         lines.append(f'    {nid}["{label}"]')
 
         prompt_label = _edge_label(a.get("query", ""), f"{a['type']} task")
@@ -321,6 +397,12 @@ def _build_mermaid(
             task_meta = f"task_id: {a['task_id']}"
             if a.get("run_id"):
                 task_meta += f"\nrun_id: {a['run_id']}"
+            if a.get("endpoint"):
+                task_meta += f"\nendpoint: {a['endpoint']}"
+            if a.get("pid"):
+                task_meta += f"\npid: {a['pid']}"
+            if a.get("model"):
+                task_meta += f"\nmodel: {a['model']}"
             _add_tooltip(tooltips, _edge_label(a.get("query", ""), f"{a['type']} task"), (a.get("query", "") + "\n\n" + task_meta).strip())
 
     return "\n".join(lines), tooltips
@@ -562,6 +644,10 @@ mermaid.run().then(function(){{
 </body></html>"""
 
 
+def _build_prewarm_html() -> str:
+    return _build_page_html("graph LR\nA[Warmup]-->B[Ready]", [], False, {}, render_id=0)
+
+
 def _render_mermaid(
     placeholder,
     mermaid_def: str,
@@ -595,7 +681,556 @@ def _render_mermaid(
         flush=True,
     )
     placeholder.empty()
-    placeholder.iframe(html, height=h)
+    with placeholder.container():
+        components.html(html, height=h, scrolling=False)
+
+
+def _build_requirement_checklist(
+    prompt_label: str | None,
+    content: str,
+    tools_used: list[dict],
+    async_snapshot: list[dict],
+    activity_log: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, bool]]:
+    text = (content or "").lower()
+    tool_names = {str(t.get("name", "")).lower() for t in tools_used}
+    statuses = {str(row.get("status", "")).lower() for row in (async_snapshot or [])}
+    activity_text = " ".join(msg.lower() for _icon, msg in (activity_log or []))
+
+    if prompt_label == "User/Profile":
+        return [
+            ("user/profile 메모리 저장 언급", "user/profile" in text or "user_preferences" in text or "user/profile" in activity_text),
+            ("메모리 조회 수행", "memory_search" in tool_names or "search" in activity_text),
+            ("향후 응답 반영 설명", "반영" in content or "reuse" in text or "이후" in content),
+        ]
+    if prompt_label == "Project/Context":
+        return [
+            ("project/context 메모리 저장 언급", "project/context" in text or "project_context" in text),
+            ("프로젝트 규칙 조회", "memory_search" in tool_names or "search" in activity_text),
+            ("코드 생성 규칙 반영 설명", "type" in text or "pytest" in text or "pydantic" in text),
+        ]
+    if prompt_label == "Domain Knowledge":
+        return [
+            ("domain/knowledge 저장 언급", "domain/knowledge" in text or "domain_knowledge" in text),
+            ("도메인 규칙 조회", "memory_search" in tool_names or "search" in activity_text),
+            ("환불 규칙 재사용 설명", "silver" in text and "refund" in text or "환불" in content),
+        ]
+    if prompt_label == "Memory Correction":
+        return [
+            ("기존 메모리 탐색", "memory_search" in tool_names or "search" in activity_text),
+            ("정정 도구 또는 정정 설명", "memory_correct" in tool_names or "정정" in content),
+            ("정정 전/후 비교", "전" in content and "후" in content or "before" in text and "after" in text),
+        ]
+    if prompt_label == "SubAgent Lifecycle":
+        return [
+            ("SubAgent 생성", "start_async_task" in tool_names or "launching" in activity_text),
+            ("상태 전이 관찰", any(s in statuses for s in {"completed", "running", "failed", "cancelled"}) or "created" in text),
+            ("종료/정리 요약", "destroyed" in text or "cleanup" in activity_text or "정리" in content),
+        ]
+    if prompt_label == "Code+Review Test":
+        return [
+            ("coder/reviewer 둘 다 실행", "start_async_task" in tool_names and ("review" in text or "reviewer" in text)),
+            ("같은 응답에서 취합", "same response" in text or "same response" in activity_text or "한 응답" in content),
+            ("최종 합성 결과", "synthesize" in text or "요약" in content or "final" in text),
+        ]
+    if prompt_label == "Blocked/Failed":
+        return [
+            ("blocked 또는 failed 감지", any(s in statuses for s in {"blocked", "failed"}) or "blocked" in text or "failed" in text),
+            ("대체 경로 실행", "alternate" in activity_text or "대체" in content),
+            ("상태 전이 요약", "state" in text or "상태 전이" in content),
+        ]
+    if prompt_label == "Loop Safety":
+        return [
+            ("timeout 설명", "timeout" in text),
+            ("tool 오류 설명", "tool" in text and ("error" in text or "오류" in content)),
+            ("safe stop 설명", "safe stop" in text or "안전" in content),
+        ]
+    if prompt_label == "Model Policy":
+        return [
+            ("현재 모델 식별", "model" in text or "모델" in content),
+            ("fallback 설명", "fallback" in text),
+            ("제약 설명", "제약" in content or "constraint" in text or "limit" in text),
+        ]
+    return []
+
+
+def _synthesize_subagent_results(agents: list[dict]) -> str:
+    """Fallback synthesis when the supervisor cannot do one more aggregation turn."""
+    completed = []
+    failed = []
+    blocked = []
+    for row in agents:
+        status = str(row.get("status", "") or row.get("durable_state", "")).lower()
+        item = {
+            "type": str(row.get("type", "subagent")),
+            "summary": str(row.get("result_summary", "") or row.get("live_output", "") or "").strip(),
+            "endpoint": str(row.get("endpoint", "") or ""),
+            "pid": row.get("pid"),
+        }
+        if status == "completed":
+            completed.append(item)
+        elif status == "failed":
+            failed.append(item)
+        elif status == "blocked":
+            blocked.append(item)
+
+    lines = []
+    if completed:
+        lines.append("SubAgent completed results:")
+        for item in completed:
+            meta = item["endpoint"]
+            if item["pid"]:
+                meta = f"{meta}, pid {item['pid']}" if meta else f"pid {item['pid']}"
+            summary = item["summary"] or "(no result content)"
+            lines.append(f"- {item['type']} [{meta or 'local'}]: {summary}")
+    if failed:
+        lines.append("")
+        lines.append("Failed subagents:")
+        for item in failed:
+            lines.append(f"- {item['type']}: {item['summary'] or '(no error detail)'}")
+    if blocked:
+        lines.append("")
+        lines.append("Blocked subagents:")
+        for item in blocked:
+            lines.append(f"- {item['type']}: {item['summary'] or '(no blocked detail)'}")
+    if not lines:
+        return "No completed SubAgent result was available to synthesize."
+    return "\n".join(lines)
+
+
+def _capture_subagent_history_snapshot(
+    tracked_agents: list[dict],
+    state_store,
+) -> list[dict]:
+    """Persist a query-local SubAgent history snapshot for later UI rendering.
+
+    The live UI uses `tracked_agents`, which is ephemeral to a single Streamlit
+    execution. To avoid losing history after cleanup/rerun, store a merged view
+    with any durable lifecycle rows/events that can be resolved by task_id.
+    """
+    rows: list[dict] = []
+    for tracked in tracked_agents:
+        snapshot = dict(tracked)
+        snapshot.setdefault("result_summary", "")
+        snapshot.setdefault("live_output", "")
+        snapshot.setdefault("task_id", "")
+        snapshot.setdefault("run_id", "")
+        snapshot.setdefault("endpoint", "")
+        snapshot.setdefault("pid", None)
+        snapshot["lifecycle_events"] = []
+        snapshot["durable_state"] = snapshot.get("status", "")
+        task_id = str(snapshot.get("task_id", "") or "").strip()
+        if state_store is not None and task_id:
+            try:
+                durable = state_store.find_subagent_by_task_id(task_id)
+                if durable:
+                    agent_id = str(durable.get("agent_id", "") or "")
+                    snapshot["agent_id"] = agent_id
+                    snapshot["durable_state"] = str(durable.get("state", "") or snapshot["durable_state"])
+                    snapshot["task_summary"] = str(durable.get("task_summary", "") or snapshot.get("query", ""))
+                    snapshot["endpoint"] = str(durable.get("endpoint", "") or snapshot.get("endpoint", ""))
+                    snapshot["pid"] = durable.get("pid") or snapshot.get("pid")
+                    snapshot["model"] = str(durable.get("model", "") or snapshot.get("model", ""))
+                    snapshot["error"] = str(durable.get("error", "") or "")
+                    if agent_id:
+                        snapshot["lifecycle_events"] = state_store.list_subagent_events(agent_id)
+            except Exception:
+                logger.exception("Failed to capture durable SubAgent history for task %s", task_id)
+        rows.append(snapshot)
+    return rows
+
+
+def _resume_async_monitoring(
+    graph_ph,
+    result_ph,
+    subagent_ph=None,
+) -> bool:
+    """Resume a turn after the main answer is visible and only async tasks remain.
+
+    This decouples "main answer completed" from "all async subagents completed".
+    The UI reruns immediately once the main answer is available, then this
+    monitor path keeps polling subagent health/output until final aggregation.
+    """
+    comp = st.session_state.agent_components
+    live_turn = st.session_state.get("_live_turn_state") or {}
+    if not comp or not live_turn or not st.session_state.get("_monitor_async_after_answer"):
+        return False
+
+    agent = comp["agent"]
+    fallback_mw = comp["fallback_middleware"]
+    loop_guard = comp["loop_guard"]
+    subagent_runtime = comp.get("subagent_runtime")
+    state_store = comp.get("state_store")
+    prompt = str(live_turn.get("prompt", "") or "")
+    final_text = str(live_turn.get("result_text", "") or "")
+    current_model = str(live_turn.get("model", "") or fallback_mw.current_model or "unknown")
+    events = list(live_turn.get("events") or [])
+    tracked_agents = list(live_turn.get("agents") or [])
+    thread_id = str(st.session_state.get("_last_query_thread_id", "") or "")
+    config = {"configurable": {"thread_id": thread_id}} if thread_id else {}
+
+    def _capture_async_tasks() -> list[dict]:
+        tracker = comp.get("async_task_tracker")
+        if not tracker or not thread_id:
+            return []
+        try:
+            rows = tracker.get_tasks(thread_id)
+            return rows if isinstance(rows, list) else []
+        except Exception:
+            return []
+
+    def _sync_live(working: bool) -> None:
+        st.session_state["_live_turn_state"] = {
+            "prompt": prompt,
+            "result_text": final_text,
+            "model": current_model,
+            "events": list(events),
+            "agents": _capture_subagent_history_snapshot(tracked_agents, state_store),
+            "working": working,
+        }
+
+    def _evt(icon: str, text: str, css: str = "") -> None:
+        ts = time.strftime("%H:%M:%S")
+        events.append({"icon": icon, "text": text, "css_class": css, "time": ts})
+        _sync_live(True)
+
+    def _refresh(working: bool) -> None:
+        agents = list(tracked_agents)
+        _sync_live(working)
+        mermaid_def, tips = _build_mermaid(
+            agents,
+            working,
+            prompt,
+            result_text=final_text,
+            model_name=current_model,
+        )
+        _render_mermaid(graph_ph, mermaid_def, events, working, num_agents=len(agents), tooltips=tips)
+
+        model_html = (
+            f"<div class='agent-bubble-model'>🧠 {_escape_html(current_model)}</div>"
+            if current_model else ""
+        )
+        result_ph.markdown(
+            f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{_bubble_width_style(final_text, 'agent')}'>"
+            f"{_escape_bubble_html(final_text)}{model_html}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        if subagent_ph is not None:
+            rows = [
+                a for a in tracked_agents
+                if a.get("task_id")
+                or a.get("live_output")
+                or a.get("result_summary")
+                or a.get("endpoint")
+                or a.get("status") in {"running", "blocked", "failed", "completed", "cancelled"}
+            ]
+            if not rows:
+                subagent_ph.empty()
+            else:
+                parts = [
+                    "<div style='margin:8px 0 14px'>"
+                    "<div style='font-size:.78em;font-weight:700;color:#64748b;letter-spacing:.35px;margin-bottom:6px'>"
+                    "SubAgent Streaming Output</div>"
+                ]
+                for row in rows:
+                    endpoint = row.get("endpoint") or ""
+                    pid = row.get("pid")
+                    model = row.get("model") or ""
+                    status = row.get("status", "running")
+                    content = row.get("live_output") or row.get("result_summary") or "waiting for output..."
+                    parts.append(
+                        "<div style='background:#fff;border:1px solid #bbf7d0;border-radius:14px;"
+                        "padding:10px 12px;margin-bottom:8px;box-shadow:0 4px 14px rgba(22,163,74,.05)'>"
+                        f"<div style='font-size:.8em;font-weight:700;color:#166534;margin-bottom:4px'>{_escape_html(row.get('type','subagent'))}</div>"
+                        f"<div style='font-size:.72em;color:#64748b;margin-bottom:6px'>{_escape_html(str(endpoint))}"
+                        f"{f'<br>pid {pid}' if pid else ''}"
+                        f"{f'<br>model { _escape_html(str(model)) }' if model else ''} · {_escape_html(str(status))}</div>"
+                        f"<div style='font-size:.88em;color:#14532d;white-space:pre-wrap;max-height:180px;overflow-y:auto'>{_escape_bubble_html(str(content))}</div>"
+                        "</div>"
+                    )
+                parts.append("</div>")
+                subagent_ph.markdown("".join(parts), unsafe_allow_html=True)
+
+    def _find_tracked_by_task_id(task_id: str) -> int | None:
+        if not task_id:
+            return None
+        for idx, agent_row in enumerate(tracked_agents):
+            if str(agent_row.get("task_id", "")) == task_id:
+                return idx
+        return None
+
+    def _drain_runtime_events() -> None:
+        if subagent_runtime is None or not hasattr(subagent_runtime, "drain_events"):
+            return
+        for event in subagent_runtime.drain_events():
+            host = _escape_html(str(event.get("host") or "127.0.0.1"))
+            port = _escape_html(str(event.get("port") or ""))
+            pid = event.get("pid")
+            name = _escape_html(str(event.get("name") or "subagent"))
+            etype = str(event.get("type") or "")
+            endpoint = f"{host}:{port}" if port else host
+            pid_line = f"<br>pid {pid}" if pid else ""
+            if etype == "spawned":
+                _evt("🚀", f"Spawned <b>{name}</b> on <b>{endpoint}</b>{pid_line}", "subagent")
+            elif etype == "healthy":
+                _evt("✅", f"<b>{name}</b> healthy on <b>{endpoint}</b>{pid_line}", "subagent")
+            elif etype == "attached":
+                _evt("🔌", f"Attached to <b>{name}</b> at <b>{endpoint}</b>{pid_line}", "subagent")
+            elif etype == "reused":
+                _evt("♻️", f"Reusing <b>{name}</b> at <b>{endpoint}</b>{pid_line}", "subagent")
+            elif etype == "stopping":
+                _evt("🧹", f"Stopping <b>{name}</b> at <b>{endpoint}</b>{pid_line}", "subagent")
+            elif etype == "stopped":
+                _evt("🧹", f"Stopped <b>{name}</b> at <b>{endpoint}</b>{pid_line}", "subagent")
+
+    def _sync_async_tasks_from_tracker() -> list[dict]:
+        rows = _capture_async_tasks()
+        for row in rows:
+            idx = _find_tracked_by_task_id(str(row.get("task_id", "") or ""))
+            if idx is None:
+                continue
+            local_status = str(tracked_agents[idx].get("status", "")).lower()
+            tracked_agents[idx]["run_id"] = str(row.get("run_id", "") or tracked_agents[idx].get("run_id", ""))
+            status = str(row.get("status", "")).lower()
+            if local_status in {"blocked", "completed", "failed", "cancelled"} and status == "running":
+                continue
+            if status in {"success", "completed"}:
+                tracked_agents[idx]["status"] = "completed"
+            elif status in {"error", "failed"}:
+                tracked_agents[idx]["status"] = "failed"
+            elif status == "cancelled":
+                tracked_agents[idx]["status"] = "cancelled"
+            else:
+                tracked_agents[idx]["status"] = "running"
+        return rows
+
+    def _poll_subagent_outputs() -> None:
+        if subagent_runtime is None:
+            return
+        _sync_async_tasks_from_tracker()
+        for row in tracked_agents:
+            task_id = str(row.get("task_id", "") or "")
+            run_id = str(row.get("run_id", "") or "")
+            agent_type = str(row.get("type", "general"))
+            if not task_id:
+                continue
+            try:
+                runtime_info = subagent_runtime.get_runtime_info(agent_type)
+            except Exception:
+                continue
+            url = runtime_info.get("url")
+            runtime_status = str(runtime_info.get("status", "") or "").lower()
+            if not url:
+                continue
+            row["endpoint"] = f"{runtime_info.get('host', '127.0.0.1')}:{runtime_info.get('port', '')}"
+            row["pid"] = runtime_info.get("pid")
+            if row.get("status") == "running" and runtime_status in {"running", "inprocess"}:
+                # A silent but healthy local process is not blocked.
+                row["last_progress_at"] = time.time()
+            try:
+                if run_id:
+                    run_resp = httpx.get(
+                        f"{url}/threads/{task_id}/runs/{run_id}",
+                        timeout=SUBAGENT_RUN_POLL_TIMEOUT_SECONDS,
+                    )
+                    if run_resp.status_code == 200:
+                        data = run_resp.json()
+                        partial = str(data.get("partial_output", "") or "")
+                        if partial:
+                            row["live_output"] = partial
+                            row["last_progress_at"] = time.time()
+                        status = str(data.get("status", "")).lower()
+                        if status in {"success", "completed"}:
+                            row["status"] = "completed"
+                        elif status in {"error", "failed"}:
+                            row["status"] = "failed"
+                            if hasattr(subagent_runtime, "update_task_state"):
+                                subagent_runtime.update_task_state(task_id=task_id, state="failed", detail=str(data.get("error", "") or "run failed"), run_id=run_id)
+                        elif status == "cancelled":
+                            row["status"] = "cancelled"
+                        elif status:
+                            row["status"] = "running"
+                if row.get("status") == "completed":
+                    thread_resp = httpx.get(
+                        f"{url}/threads/{task_id}",
+                        timeout=SUBAGENT_RUN_POLL_TIMEOUT_SECONDS,
+                    )
+                    if thread_resp.status_code == 200:
+                        messages = (thread_resp.json().get("messages") or [])
+                        assistants = [m for m in messages if isinstance(m, dict) and m.get("role") == "assistant"]
+                        if assistants:
+                            final_output = str(assistants[-1].get("content", "") or "")
+                            if final_output:
+                                row["result_summary"] = final_output
+                                row["live_output"] = final_output
+            except Exception:
+                continue
+            if row.get("status") == "running" and runtime_status not in {"running", "inprocess"}:
+                row["status"] = "failed"
+                row["result_summary"] = row.get("result_summary") or f"SubAgent runtime is no longer healthy ({runtime_status or 'unknown'})."
+                row["last_progress_at"] = time.time()
+                _evt("❌", f"SubAgent <b>{_escape_html(agent_type)}</b> runtime stopped unexpectedly", "error")
+            elif row.get("status") == "running":
+                last_progress_at = float(row.get("last_progress_at") or row.get("started_at") or time.time())
+                if time.time() - last_progress_at >= BLOCKED_AFTER_SECONDS:
+                    row["status"] = "blocked"
+                    row["result_summary"] = row.get("result_summary") or "No observable progress within the blocked threshold."
+                    row["last_progress_at"] = time.time()
+                    if hasattr(subagent_runtime, "update_task_state"):
+                        subagent_runtime.update_task_state(task_id=task_id, state="blocked", detail="No output or status progress detected within threshold", run_id=run_id or None)
+                    _evt("⛔", f"SubAgent <b>{_escape_html(agent_type)}</b> appears blocked", "error")
+
+    def _unfinished_async_tasks() -> list[dict]:
+        rows = _sync_async_tasks_from_tracker()
+        unfinished: list[dict] = []
+        for row in rows:
+            task_id = str(row.get("task_id", "") or "")
+            idx = _find_tracked_by_task_id(task_id)
+            if idx is not None:
+                local_status = str(tracked_agents[idx].get("status", "")).lower()
+                if local_status in {"blocked", "completed", "failed", "cancelled"}:
+                    continue
+            if str(row.get("status", "")).lower() not in {"success", "completed", "error", "failed", "cancelled"}:
+                unfinished.append(row)
+        return unfinished
+
+    def _maybe_schedule_alternate_subagent() -> None:
+        for row in tracked_agents:
+            if row.get("status") not in {"blocked", "failed"} or row.get("alternate_attempted"):
+                continue
+            source_role = str(row.get("type", "general"))
+            alternate_role = ALTERNATE_ROLE_POLICY.get(source_role)
+            row["alternate_attempted"] = True
+            if not alternate_role:
+                continue
+            task_summary = str(row.get("query", "") or row.get("result_summary", "") or "recover prior subagent failure")
+            _evt("🧭", f"Alternate path policy: launching <b>{alternate_role}</b> for {source_role} recovery", "subagent")
+            try:
+                agent.invoke(
+                    {
+                        "messages": [
+                            HumanMessage(
+                                content=(
+                                    f"A subagent of role `{source_role}` became `{row.get('status')}` while handling: {task_summary}. "
+                                    f"Launch one async `{alternate_role}` subagent to recover or validate the work, "
+                                    "then continue the same user turn."
+                                )
+                            )
+                        ]
+                    },
+                    config=config,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _evt("⚠️", f"Alternate path launch failed: {_escape_html(str(exc))}", "error")
+
+    def _persist_history_snapshot(content: str, model: str) -> None:
+        final_agents = list(tracked_agents)
+        subagent_history_snapshot = _capture_subagent_history_snapshot(final_agents, state_store)
+        final_mdef, final_tips = _build_mermaid(
+            final_agents,
+            False,
+            prompt,
+            result_text=content,
+            model_name=model,
+        )
+        prompt_label = st.session_state.get("_active_test_prompt_label")
+        st.session_state.chat_messages.append({
+            "role": "assistant",
+            "content": content,
+            "model": model,
+            "tools_used": [],
+            "activity_log": [(e["icon"], e["text"]) for e in events],
+            "mermaid_def": final_mdef,
+            "mermaid_html": None,
+            "mermaid_tooltips": final_tips,
+            "mermaid_events": list(events),
+            "num_agents": len(final_agents),
+            "async_task_snapshot": _capture_async_tasks(),
+            "subagent_history_snapshot": subagent_history_snapshot,
+            "test_prompt_label": prompt_label,
+            "requirement_checklist": _build_requirement_checklist(
+                prompt_label,
+                content,
+                [],
+                _capture_async_tasks(),
+                [(e["icon"], e["text"]) for e in events],
+            ),
+        })
+
+    def _cleanup_turn_subagents_async() -> None:
+        if subagent_runtime is None or not hasattr(subagent_runtime, "shutdown_turn_subagents"):
+            return
+        def _worker() -> None:
+            try:
+                subagent_runtime.shutdown_turn_subagents()
+            except Exception:
+                logger.exception("Background subagent cleanup failed")
+        threading.Thread(target=_worker, daemon=True).start()
+
+    if st.session_state.get("_refresh_requested"):
+        _cleanup_turn_subagents_async()
+        return False
+    if st.session_state.get("_stop_requested"):
+        _cleanup_turn_subagents_async()
+        st.session_state["_is_running"] = False
+        st.session_state["_has_result"] = True
+        st.session_state.pop("_monitor_async_after_answer", None)
+        st.session_state.pop("_live_turn_state", None)
+        st.rerun()
+
+    _drain_runtime_events()
+    _poll_subagent_outputs()
+    _maybe_schedule_alternate_subagent()
+    unfinished = _unfinished_async_tasks()
+    last_wait_count = st.session_state.get("_monitor_last_wait_count", -1)
+    if unfinished:
+        if len(unfinished) != last_wait_count:
+            _evt("⏳", f"Waiting for {len(unfinished)} async task(s) to finish before closing this user session", "subagent")
+            st.session_state["_monitor_last_wait_count"] = len(unfinished)
+        _refresh(True)
+        time.sleep(0.05)
+        st.rerun()
+
+    _evt("🧩", "All async subagents finished. Collecting results into one final answer", "subagent")
+    try:
+        loop_guard.reset()
+        result = agent.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "All async subagent tasks from this user turn should now be finished. "
+                            "Collect every completed result using live async task tools if needed, "
+                            "then produce one final synthesized answer for the user. "
+                            "Do not launch new async tasks unless absolutely required."
+                        )
+                    )
+                ]
+            },
+            config=config,
+        )
+        for msg in reversed(result.get("messages", [])):
+            if getattr(msg, "type", None) == "ai" and getattr(msg, "content", None):
+                content = getattr(msg, "content")
+                final_text = content if isinstance(content, str) else str(content)
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Final async aggregation failed during monitor mode")
+        _evt("⚠️", f"Final async aggregation failed: {_escape_html(str(exc))}", "error")
+        final_text = _synthesize_subagent_results(tracked_agents)
+
+    _poll_subagent_outputs()
+    current_model = fallback_mw.current_model or current_model or "unknown"
+    _refresh(False)
+    _persist_history_snapshot(final_text or "*(No response generated)*", current_model)
+    _cleanup_turn_subagents_async()
+    st.session_state["_is_running"] = False
+    st.session_state["_has_result"] = True
+    st.session_state.pop("_monitor_async_after_answer", None)
+    st.session_state.pop("_monitor_last_wait_count", None)
+    st.session_state.pop("_live_turn_state", None)
+    st.rerun()
 
 
 # ─────────────────────────────────────────────────────────
@@ -617,12 +1252,14 @@ def _stream_response(
     fallback_mw = comp["fallback_middleware"]
     loop_guard = comp["loop_guard"]
     subagent_runtime = comp.get("subagent_runtime")
+    state_store = comp.get("state_store")
 
     st.session_state.chat_messages.append({"role": "user", "content": prompt})
     loop_guard.reset()
 
     # ── Query-scoped thread ID ───────────────────────────────
     thread_id = f"webui-query-{uuid.uuid4().hex}"
+    loop_run_id = f"loop_{uuid.uuid4().hex[:12]}"
     st.session_state["_last_query_thread_id"] = thread_id
     config = {"configurable": {"thread_id": thread_id}}
     inputs = {"messages": [HumanMessage(content=prompt)]}
@@ -635,6 +1272,8 @@ def _stream_response(
     step_count = 0
     t_start = time.time()
     history_snapshot_saved = False
+    stream_cutoff_for_async = False
+    last_subagent_poll_at = 0.0
 
     # Local SubAgent tracking — 질의별 독립
     tracked_agents: list[dict] = []
@@ -660,17 +1299,85 @@ def _stream_response(
         except Exception:
             return []
 
+    def _sync_live_turn_state(*, working: bool) -> None:
+        st.session_state["_live_turn_state"] = {
+            "prompt": prompt,
+            "result_text": final_text or streamed_text,
+            "model": current_model,
+            "events": list(events),
+            "agents": _capture_subagent_history_snapshot(_agents_state(), state_store),
+            "working": working,
+        }
+
+    def _clear_live_turn_state() -> None:
+        st.session_state.pop("_live_turn_state", None)
+
+    def _mark_ui_ready_for_next_turn() -> None:
+        st.session_state["_is_running"] = False
+        st.session_state["_has_result"] = True
+
+    def _finalize_and_rerun() -> None:
+        _mark_ui_ready_for_next_turn()
+        _clear_live_turn_state()
+        st.rerun()
+
+    def _record_loop(
+        status: str,
+        current_step: str,
+        *,
+        failure_reason: str | None = None,
+        next_action: str | None = None,
+        retries: int = 0,
+        policy_type: str | None = None,
+    ) -> None:
+        if state_store is None:
+            return
+        try:
+            metadata = {"prompt_preview": prompt[:200]}
+            if policy_type:
+                policy = get_policy(policy_type)
+                metadata["policy"] = {
+                    "type": policy.failure_type,
+                    "detect_signal": policy.detect_signal,
+                    "max_retries": policy.max_retries,
+                    "fallback": policy.fallback,
+                    "user_status": policy.user_status,
+                    "safe_stop_condition": policy.safe_stop_condition,
+                }
+            state_store.upsert_loop_run(
+                run_id=loop_run_id,
+                thread_id=thread_id,
+                status=status,
+                current_step=current_step,
+                retries=retries,
+                failure_reason=failure_reason,
+                next_action=next_action,
+                model=fallback_mw.current_model or None,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("Failed to persist loop run state")
+
     def _persist_history_snapshot(content: str, model: str, events_working: bool = False) -> None:
         nonlocal history_snapshot_saved
         if history_snapshot_saved:
             return
         final_agents = _agents_state()
+        subagent_history_snapshot = _capture_subagent_history_snapshot(final_agents, state_store)
         final_mdef, final_tips = _build_mermaid(
             final_agents,
             events_working,
             prompt,
             result_text=content,
             model_name=model,
+        )
+        prompt_label = st.session_state.get("_active_test_prompt_label")
+        checklist = _build_requirement_checklist(
+            prompt_label,
+            content,
+            list(tools_used),
+            _capture_async_tasks(),
+            [(e["icon"], e["text"]) for e in events],
         )
         st.session_state.chat_messages.append({
             "role": "assistant",
@@ -679,17 +1386,29 @@ def _stream_response(
             "tools_used": list(tools_used),
             "activity_log": [(e["icon"], e["text"]) for e in events],
             "mermaid_def": final_mdef,
+            "mermaid_html": None,
             "mermaid_tooltips": final_tips,
             "mermaid_events": list(events),
             "num_agents": len(final_agents),
             "async_task_snapshot": _capture_async_tasks(),
+            "subagent_history_snapshot": subagent_history_snapshot,
+            "test_prompt_label": prompt_label,
+            "requirement_checklist": checklist,
         })
         history_snapshot_saved = True
+        _clear_live_turn_state()
 
     def _render_subagent_outputs() -> None:
         if subagent_ph is None:
             return
-        rows = [a for a in tracked_agents if a.get("task_id") or a.get("live_output") or a.get("result_summary")]
+        rows = [
+            a for a in tracked_agents
+            if a.get("task_id")
+            or a.get("live_output")
+            or a.get("result_summary")
+            or a.get("endpoint")
+            or a.get("status") in {"running", "blocked", "failed", "completed", "cancelled"}
+        ]
         if not rows:
             subagent_ph.empty()
             return
@@ -758,7 +1477,7 @@ def _stream_response(
             return
         try:
             subagent_runtime.shutdown_turn_subagents()
-            _drain_runtime_events(refresh=False)
+            _drain_runtime_events(refresh=True)
         except Exception as exc:  # noqa: BLE001
             _evt("⚠️", f"Subagent cleanup warning: {_escape_html(str(exc))}", "error", refresh=False)
 
@@ -780,9 +1499,9 @@ def _stream_response(
             return
         bubble_style = _bubble_width_style(text, "agent")
         result_ph.markdown(
-            f"<div class='agent-bubble' style='{bubble_style}'>"
+            f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{bubble_style}'>"
             f"{text}<div class='agent-bubble-model'>Working...</div>"
-            "</div>",
+            "</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -792,7 +1511,7 @@ def _stream_response(
             model_html = f"<div class='agent-bubble-model'>🧠 {_escape_html(model)}</div>"
         bubble_style = _bubble_width_style(text, "agent")
         result_ph.markdown(
-            f"<div class='agent-bubble' style='{bubble_style}'>{_escape_bubble_html(text)}{model_html}</div>",
+            f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{bubble_style}'>{_escape_bubble_html(text)}{model_html}</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -881,6 +1600,7 @@ def _stream_response(
     def _evt(icon: str, text: str, css: str = "", refresh: bool = True) -> None:
         ts = time.strftime("%H:%M:%S")
         events.append({"icon": icon, "text": text, "css_class": css, "time": ts})
+        _sync_live_turn_state(working=True)
         _render_agent_status(f"{icon} {text}")
         _render_subagent_outputs()
         if refresh:
@@ -895,8 +1615,12 @@ def _stream_response(
                 info = subagent_runtime.get_runtime_info(agent_type)
                 endpoint = f"{info.get('host', '127.0.0.1')}:{info.get('port', '')}"
                 pid = info.get("pid")
+                model = str(info.get("model", "") or "")
             except Exception:
                 endpoint = ""
+                model = ""
+        else:
+            model = ""
         idx = _sa_counter[0]
         _sa_counter[0] += 1
         tracked_agents.append({
@@ -908,11 +1632,13 @@ def _stream_response(
             "query": description,
             "task_id": "",
             "run_id": "",
-            "model": "",
+            "model": model,
             "started_at": time.time(),
             "endpoint": endpoint,
             "pid": pid,
             "live_output": "",
+            "last_progress_at": time.time(),
+            "alternate_attempted": False,
         })
         print(
             "[CodingAgent Mermaid] spawn_async_subagent",
@@ -952,8 +1678,11 @@ def _stream_response(
             idx = _find_tracked_by_task_id(str(row.get("task_id", "")))
             if idx is None:
                 continue
+            local_status = str(tracked_agents[idx].get("status", "")).lower()
             tracked_agents[idx]["run_id"] = str(row.get("run_id", "") or tracked_agents[idx].get("run_id", ""))
             status = str(row.get("status", "")).lower()
+            if local_status in {"blocked", "completed", "failed", "cancelled"} and status == "running":
+                continue
             if status in {"success", "completed"}:
                 tracked_agents[idx]["status"] = "completed"
             elif status in {"error", "failed"}:
@@ -980,30 +1709,46 @@ def _stream_response(
             except Exception:
                 continue
             url = runtime_info.get("url")
+            runtime_status = str(runtime_info.get("status", "") or "").lower()
             if not url:
                 continue
             row["endpoint"] = f"{runtime_info.get('host', '127.0.0.1')}:{runtime_info.get('port', '')}"
             row["pid"] = runtime_info.get("pid")
+            row["model"] = str(runtime_info.get("model", "") or row.get("model", ""))
+            if row.get("status") == "running" and runtime_status in {"running", "inprocess"}:
+                row["last_progress_at"] = time.time()
             try:
                 if run_id:
-                    run_resp = httpx.get(f"{url}/threads/{task_id}/runs/{run_id}", timeout=0.35)
+                    run_resp = httpx.get(
+                        f"{url}/threads/{task_id}/runs/{run_id}",
+                        timeout=SUBAGENT_RUN_POLL_TIMEOUT_SECONDS,
+                    )
                     if run_resp.status_code == 200:
                         data = run_resp.json()
                         partial = str(data.get("partial_output", "") or "")
                         if partial and partial != row.get("live_output", ""):
                             row["live_output"] = partial
+                            row["last_progress_at"] = time.time()
                             changed = True
                         status = str(data.get("status", "")).lower()
                         if status in {"success", "completed"}:
                             row["status"] = "completed"
+                            row["last_progress_at"] = time.time()
                         elif status in {"error", "failed"}:
                             row["status"] = "failed"
+                            row["last_progress_at"] = time.time()
+                            subagent_runtime.update_task_state(task_id=task_id, state="failed", detail=str(data.get("error", "") or "run failed"), run_id=run_id)
                         elif status == "cancelled":
                             row["status"] = "cancelled"
+                            row["last_progress_at"] = time.time()
+                            subagent_runtime.update_task_state(task_id=task_id, state="cancelled", detail="run cancelled", run_id=run_id)
                         elif status:
                             row["status"] = "running"
                 if row.get("status") == "completed":
-                    thread_resp = httpx.get(f"{url}/threads/{task_id}", timeout=0.35)
+                    thread_resp = httpx.get(
+                        f"{url}/threads/{task_id}",
+                        timeout=SUBAGENT_RUN_POLL_TIMEOUT_SECONDS,
+                    )
                     if thread_resp.status_code == 200:
                         messages = (thread_resp.json().get("messages") or [])
                         assistants = [m for m in messages if isinstance(m, dict) and m.get("role") == "assistant"]
@@ -1012,19 +1757,107 @@ def _stream_response(
                             if final_output and final_output != row.get("result_summary", ""):
                                 row["result_summary"] = final_output
                                 row["live_output"] = final_output
+                                row["last_progress_at"] = time.time()
                                 changed = True
             except Exception:
                 continue
+            if row.get("status") == "running" and runtime_status not in {"running", "inprocess"}:
+                row["status"] = "failed"
+                row["result_summary"] = row.get("result_summary") or f"SubAgent runtime is no longer healthy ({runtime_status or 'unknown'})."
+                row["last_progress_at"] = time.time()
+                _evt("❌", f"SubAgent <b>{_escape_html(agent_type)}</b> runtime stopped unexpectedly", "error", refresh=False)
+                changed = True
+            elif row.get("status") == "running":
+                last_progress_at = float(row.get("last_progress_at") or row.get("started_at") or time.time())
+                if time.time() - last_progress_at >= BLOCKED_AFTER_SECONDS:
+                    row["status"] = "blocked"
+                    row["result_summary"] = row.get("result_summary") or "No observable progress within the blocked threshold."
+                    row["last_progress_at"] = time.time()
+                    subagent_runtime.update_task_state(task_id=task_id, state="blocked", detail="No output or status progress detected within threshold", run_id=run_id or None)
+                    _evt("⛔", f"SubAgent <b>{_escape_html(agent_type)}</b> appears blocked", "error", refresh=False)
+                    changed = True
         if changed:
             _render_subagent_outputs()
             _refresh(True, result=final_text, model=current_model)
 
     def _unfinished_async_tasks() -> list[dict]:
         rows = _sync_async_tasks_from_tracker()
-        return [
-            row for row in rows
-            if str(row.get("status", "")).lower() not in {"success", "completed", "error", "failed", "cancelled"}
-        ]
+        unfinished: list[dict] = []
+        for row in rows:
+            task_id = str(row.get("task_id", "") or "")
+            idx = _find_tracked_by_task_id(task_id)
+            if idx is not None:
+                local_status = str(tracked_agents[idx].get("status", "")).lower()
+                if local_status in {"blocked", "completed", "failed", "cancelled"}:
+                    continue
+            if str(row.get("status", "")).lower() not in {"success", "completed", "error", "failed", "cancelled"}:
+                unfinished.append(row)
+        return unfinished
+
+    def _maybe_schedule_alternate_subagent() -> bool:
+        triggered = False
+        for row in tracked_agents:
+            if row.get("status") not in {"blocked", "failed"}:
+                continue
+            if row.get("alternate_attempted"):
+                continue
+            source_role = str(row.get("type", "general"))
+            alternate_role = ALTERNATE_ROLE_POLICY.get(source_role)
+            if not alternate_role:
+                row["alternate_attempted"] = True
+                continue
+            row["alternate_attempted"] = True
+            task_summary = str(row.get("query", "") or row.get("result_summary", "") or "recover prior subagent failure")
+            _evt(
+                "🧭",
+                f"Alternate path policy: launching <b>{alternate_role}</b> for {source_role} recovery",
+                "subagent",
+                refresh=False,
+            )
+            _record_loop(
+                "running",
+                "alternate_path",
+                failure_reason=f"{source_role} entered {row.get('status')}",
+                next_action=f"launch_alternate:{alternate_role}",
+                policy_type="subagent_failure",
+            )
+            try:
+                result = agent.invoke(
+                    {
+                        "messages": [
+                            HumanMessage(
+                                content=(
+                                    f"A subagent of role `{source_role}` became `{row.get('status')}` while handling: {task_summary}. "
+                                    f"Launch one async `{alternate_role}` subagent to recover or validate the work, "
+                                    "then continue the same user turn."
+                                )
+                            )
+                        ]
+                    },
+                    config=config,
+                )
+                for msg in result.get("messages", []):
+                    if _msg_type(msg) == "tool":
+                        tools_used.append({
+                            "name": _msg_name(msg),
+                            "result": str(_msg_content(msg) or "")[:200],
+                            "is_subagent": _is_subagent_tool(_msg_name(msg)),
+                        })
+                triggered = True
+            except Exception as exc:  # noqa: BLE001
+                _evt("⚠️", f"Alternate path launch failed: {_escape_html(str(exc))}", "error", refresh=False)
+                _record_loop(
+                    "degraded",
+                    "alternate_path_failed",
+                    failure_reason=str(exc),
+                    next_action="return_current_failure",
+                    policy_type="subagent_failure",
+                )
+        if triggered:
+            _drain_runtime_events(refresh=True)
+            _poll_subagent_outputs()
+            _refresh(True, result=final_text, model=current_model)
+        return triggered
 
     def _track_complete(
         agent_type: str,
@@ -1056,6 +1889,7 @@ def _stream_response(
         agent = tracked_agents[idx]
         agent["status"] = status or ("completed" if success else "failed")
         agent["elapsed"] = f"{time.time() - agent['started_at']:.1f}"
+        agent["last_progress_at"] = time.time()
         if model:
             agent["model"] = model
         if result_summary:
@@ -1071,6 +1905,11 @@ def _stream_response(
         return True
 
     def _parse_task_id(text: str) -> str:
+        payload = _parse_check_payload(text)
+        for key in ("task_id", "thread_id"):
+            value = str(payload.get(key, "") or "").strip()
+            if value:
+                return value
         match = re.search(r"task_id:\s*([a-f0-9-]{8,})", text, flags=re.IGNORECASE)
         return match.group(1) if match else ""
 
@@ -1083,8 +1922,10 @@ def _stream_response(
         except json.JSONDecodeError:
             return {}
         parsed = {
+            "task_id": str(data.get("task_id", "")),
             "status": str(data.get("status", "")),
             "thread_id": str(data.get("thread_id", "")),
+            "run_id": str(data.get("run_id", "")),
             "result": str(data.get("result", "")),
             "error": str(data.get("error", "")),
         }
@@ -1121,6 +1962,7 @@ def _stream_response(
 
     def _refresh(working: bool, result: str = "", model: str = "") -> None:
         agents = _agents_state()
+        _sync_live_turn_state(working=working)
         mdef, tips = _build_mermaid(
             agents, working, prompt,
             result_text=result, model_name=model,
@@ -1132,6 +1974,8 @@ def _stream_response(
     # ── Non-streaming fallback ────────────────────────────
 
     try:
+        _record_loop("running", "start")
+        _sync_live_turn_state(working=True)
         _evt("🚀", f"Prompt received ({len(prompt)} chars)", "tool")
 
         if not hasattr(agent, "stream"):
@@ -1162,7 +2006,7 @@ def _stream_response(
                 safe_final_text = _escape_bubble_html(final_text or "*(No response)*")
                 bubble_style = _bubble_width_style(final_text or "*(No response)*", "agent")
                 st.markdown(
-                    f"<div class='agent-bubble' style='{bubble_style}'>{safe_final_text}{_model_tag}</div>",
+                    f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{bubble_style}'>{safe_final_text}{_model_tag}</div></div>",
                     unsafe_allow_html=True,
                 )
 
@@ -1177,6 +2021,14 @@ def _stream_response(
                 inv_agents, False, prompt,
                 result_text=final_text, model_name=current_model,
             )
+            inv_html = _build_page_html(
+                inv_mdef,
+                list(events),
+                False,
+                tooltips=inv_tips,
+            )
+            prompt_label = st.session_state.get("_active_test_prompt_label")
+            subagent_history_snapshot = _capture_subagent_history_snapshot(inv_agents, state_store)
             st.session_state.chat_messages.append({
                 "role": "assistant",
                 "content": final_text or "*(No response)*",
@@ -1184,11 +2036,22 @@ def _stream_response(
                 "tools_used": tools_used,
                 "activity_log": [(e["icon"], e["text"]) for e in events],
                 "mermaid_def": inv_mdef,
+                "mermaid_html": inv_html,
                 "mermaid_tooltips": inv_tips,
                 "mermaid_events": list(events),
                 "num_agents": len(inv_agents),
                 "async_task_snapshot": _capture_async_tasks(),
+                "subagent_history_snapshot": subagent_history_snapshot,
+                "test_prompt_label": prompt_label,
+                "requirement_checklist": _build_requirement_checklist(
+                    prompt_label,
+                    final_text or "",
+                    list(tools_used),
+                    _capture_async_tasks(),
+                    [(e["icon"], e["text"]) for e in events],
+                ),
             })
+            _finalize_and_rerun()
             return True
 
         # ── Streaming mode ────────────────────────────────
@@ -1211,12 +2074,18 @@ def _stream_response(
             )
 
         for raw_chunk in stream:
-            _drain_runtime_events(refresh=False)
+            _drain_runtime_events(refresh=True)
+            now = time.time()
+            if now - last_subagent_poll_at >= SUBAGENT_POLL_INTERVAL_SECONDS:
+                _poll_subagent_outputs()
+                last_subagent_poll_at = now
             if _is_refresh_requested():
+                _record_loop("stopped", "refresh_requested", next_action="user_refresh", policy_type="safe_stop")
                 _evt("🛑", "Refresh requested — stopping current run", "error", refresh=False)
                 _cleanup_turn_subagents_async()
                 return False
             if _is_stop_requested():
+                _record_loop("stopped", "stop_requested", next_action="user_stop", policy_type="safe_stop")
                 _evt("🛑", "Stop requested — halting current run", "error", refresh=False)
                 if final_text:
                     current_model = fallback_mw.current_model or current_model or "unknown"
@@ -1224,6 +2093,7 @@ def _stream_response(
                     _render_agent_answer(final_text, current_model)
                     _persist_history_snapshot(final_text, current_model)
                     _cleanup_turn_subagents_async()
+                    _finalize_and_rerun()
                     return True
                 _cleanup_turn_subagents_async()
                 _refresh(False)
@@ -1254,7 +2124,10 @@ def _stream_response(
                     if text_delta:
                         streamed_text += text_delta
                         final_text = streamed_text
+                        current_model = fallback_mw.current_model or current_model or "unknown"
                         _render_agent_answer(streamed_text)
+                        if not tracked_agents:
+                            _refresh(False, result=streamed_text, model=current_model)
                 continue
 
             if not is_main_agent:
@@ -1265,12 +2138,42 @@ def _stream_response(
                 continue
 
             step_count += 1
+            if (loop_warning := loop_guard.check_iteration()) is not None:
+                if tracked_agents:
+                    stream_cutoff_for_async = True
+                    _evt(
+                        "🧭",
+                        "Main loop iteration cap reached after launching async work; switching to async wait/collect mode",
+                        "subagent",
+                        refresh=False,
+                    )
+                    _record_loop(
+                        "degraded",
+                        "iteration_cutoff_async_collect",
+                        failure_reason=loop_warning,
+                        next_action="wait_for_async_tasks",
+                        policy_type="no_progress_loop",
+                    )
+                    break
+                _evt("🛑", _escape_html(loop_warning), "error", refresh=False)
+                _record_loop(
+                    "stopped",
+                    "no_progress_guard",
+                    failure_reason=loop_warning,
+                    next_action="safe_stop",
+                    policy_type="no_progress_loop",
+                )
+                _cleanup_turn_subagents_async()
+                _refresh(False, result=final_text, model=current_model)
+                return bool(final_text)
             for _node, node_output in chunk.items():
                 if _is_refresh_requested():
+                    _record_loop("stopped", "refresh_requested", next_action="user_refresh", policy_type="safe_stop")
                     _evt("🛑", "Refresh requested — stopping current run", "error", refresh=False)
                     _cleanup_turn_subagents_async()
                     return False
                 if _is_stop_requested():
+                    _record_loop("stopped", "stop_requested", next_action="user_stop", policy_type="safe_stop")
                     _evt("🛑", "Stop requested — halting current run", "error", refresh=False)
                     if final_text:
                         current_model = fallback_mw.current_model or current_model or "unknown"
@@ -1278,6 +2181,7 @@ def _stream_response(
                         _render_agent_answer(final_text, current_model)
                         _persist_history_snapshot(final_text, current_model)
                         _cleanup_turn_subagents_async()
+                        _finalize_and_rerun()
                         return True
                     _cleanup_turn_subagents_async()
                     _refresh(False)
@@ -1319,7 +2223,7 @@ def _stream_response(
                                         f"Launching <b>{atype}</b> async task: {desc}",
                                         "subagent",
                                     )
-                                    _drain_runtime_events(refresh=False)
+                                    _drain_runtime_events(refresh=True)
                                 elif name == "list_async_tasks":
                                     _evt("📋", "Listing async task status", "subagent")
                                 elif name == "check_async_task":
@@ -1382,10 +2286,8 @@ def _stream_response(
                                 "done",
                                 refresh=False,
                             )
-                            _refresh(False, result=final_text, model=current_model)
                             _render_agent_answer(final_text, current_model)
-                            _persist_history_snapshot(final_text, current_model)
-                            return True
+                            _refresh(True if tracked_agents else False, result=final_text, model=current_model)
 
                     elif msg_type == "tool":
                         tool_name = _msg_name(msg)
@@ -1415,8 +2317,10 @@ def _stream_response(
                             # Extract raw result from tool output (no truncation)
                             _result_raw = ""
                             task_id = _parse_task_id(tool_content_full)
+                            start_payload = _parse_check_payload(tool_content_full)
+                            run_id = start_payload.get("run_id", "")
                             if task_id:
-                                _set_task_identity(tracked_idx, task_id=task_id)
+                                _set_task_identity(tracked_idx, task_id=task_id, run_id=run_id)
                             if tool_content_full.strip():
                                 _result_raw = tool_content_full.strip()
 
@@ -1511,18 +2415,27 @@ def _stream_response(
                 # 매 chunk마다 모델명 갱신 시도
                 if fallback_mw.current_model:
                     current_model = fallback_mw.current_model
-                _drain_runtime_events(refresh=False)
+                _drain_runtime_events(refresh=True)
 
         had_async_subagents = bool(tracked_agents)
+        if stream_cutoff_for_async:
+            _evt(
+                "⏳",
+                f"Proceeding with {len(tracked_agents)} launched async task(s) despite main loop cutoff",
+                "subagent",
+                refresh=False,
+            )
         wait_rounds = 0
         unfinished = _unfinished_async_tasks()
         last_wait_count = -1
         while unfinished and wait_rounds < 240:
             if _is_refresh_requested():
+                _record_loop("stopped", "refresh_requested", next_action="user_refresh", policy_type="safe_stop")
                 _evt("🛑", "Refresh requested — stopping current run", "error", refresh=False)
                 _cleanup_turn_subagents_async()
                 return False
             if _is_stop_requested():
+                _record_loop("stopped", "stop_requested", next_action="user_stop", policy_type="safe_stop")
                 _evt("🛑", "Stop requested — halting current run", "error", refresh=False)
                 _cleanup_turn_subagents_async()
                 _refresh(False, result=final_text, model=current_model)
@@ -1536,8 +2449,9 @@ def _stream_response(
                 )
                 last_wait_count = len(unfinished)
             _poll_subagent_outputs()
+            _maybe_schedule_alternate_subagent()
             _render_agent_status("Waiting for async subagents to finish...")
-            time.sleep(0.5)
+            time.sleep(SUBAGENT_POLL_INTERVAL_SECONDS)
             wait_rounds += 1
             unfinished = _unfinished_async_tasks()
 
@@ -1547,6 +2461,13 @@ def _stream_response(
                 f"Timed out waiting for {len(unfinished)} async task(s); returning the latest available result",
                 "error",
                 refresh=False,
+            )
+            _record_loop(
+                "degraded",
+                "async_wait_timeout",
+                failure_reason=f"{len(unfinished)} unfinished async tasks",
+                next_action="return_latest",
+                policy_type="subagent_failure",
             )
 
         if had_async_subagents and not unfinished:
@@ -1559,6 +2480,7 @@ def _stream_response(
                 "Do not launch new async tasks unless absolutely required."
             )
             try:
+                loop_guard.reset()
                 result = agent.invoke(
                     {"messages": [HumanMessage(content=followup)]},
                     config=config,
@@ -1570,6 +2492,14 @@ def _stream_response(
                         break
             except Exception as exc:  # noqa: BLE001
                 _evt("⚠️", f"Final async aggregation failed: {_escape_html(str(exc))}", "error", refresh=False)
+                final_text = _synthesize_subagent_results(tracked_agents)
+                _record_loop(
+                    "degraded",
+                    "aggregation_fallback",
+                    failure_reason=str(exc),
+                    next_action="return_subagent_summary",
+                    policy_type="no_progress_loop",
+                )
             _poll_subagent_outputs()
 
         # ── Extract final text if not captured ────────────
@@ -1593,6 +2523,13 @@ def _stream_response(
 
         if not final_text:
             final_text = "*(No response generated)*"
+            _record_loop(
+                "degraded",
+                "empty_response",
+                failure_reason="No final response generated",
+                next_action="return_placeholder",
+                policy_type="no_progress_loop",
+            )
 
         current_model = fallback_mw.current_model or current_model or "unknown"
         _model_tag = f"<div class='agent-bubble-model'>🧠 {_escape_html(current_model)}</div>"
@@ -1603,24 +2540,28 @@ def _stream_response(
             "done",
             refresh=False,
         )
+        _record_loop("completed", "finalized")
         # 최종 Mermaid를 먼저 갱신한 뒤 답변 bubble을 채워서 둘이 같이 나타나는 느낌을 준다.
         _refresh(False, result=final_text, model=current_model)
         with result_ph:
             safe_final_text = _escape_bubble_html(final_text)
             bubble_style = _bubble_width_style(final_text, "agent")
             st.markdown(
-                f"<div class='agent-bubble' style='{bubble_style}'>{safe_final_text}{_model_tag}</div>",
+                f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{bubble_style}'>{safe_final_text}{_model_tag}</div></div>",
                 unsafe_allow_html=True,
             )
 
         _persist_history_snapshot(final_text, current_model)
         _cleanup_turn_subagents_async()
+        _finalize_and_rerun()
         return True
 
     except Exception as e:
         tb = traceback.format_exc()
         logger.error("Agent error: %s\n%s", e, tb)
         elapsed_s = f"{time.time() - t_start:.1f}"
+        policy_type = "external_api_error" if isinstance(e, httpx.HTTPError) else "tool_call_error"
+        _record_loop("failed", "exception", failure_reason=str(e), next_action="safe_stop", policy_type=policy_type)
         _evt("❌", f"Error after {elapsed_s}s: {_escape_html(str(e))}", "error")
         with result_ph:
             st.error(f"Error: {e}")
@@ -1629,18 +2570,37 @@ def _stream_response(
         _refresh(False)
         err_agents = _agents_state()
         err_mdef, err_tips = _build_mermaid(err_agents, False, prompt)
+        err_html = _build_page_html(
+            err_mdef,
+            list(events),
+            False,
+            tooltips=err_tips,
+        )
         st.session_state.chat_messages.append({
             "role": "assistant",
             "content": f"Error: {e}",
             "model": None,
             "tools_used": [],
             "mermaid_def": err_mdef,
+            "mermaid_html": err_html,
             "mermaid_tooltips": err_tips,
             "mermaid_events": list(events),
             "num_agents": len(err_agents),
             "async_task_snapshot": _capture_async_tasks(),
+            "subagent_history_snapshot": _capture_subagent_history_snapshot(err_agents, state_store),
+            "test_prompt_label": st.session_state.get("_active_test_prompt_label"),
+            "requirement_checklist": _build_requirement_checklist(
+                st.session_state.get("_active_test_prompt_label"),
+                f"Error: {e}",
+                [],
+                _capture_async_tasks(),
+                [(ev["icon"], ev["text"]) for ev in events],
+            ),
         })
+        st.session_state["_is_running"] = False
+        st.session_state["_has_result"] = True
         _cleanup_turn_subagents_async()
+        _clear_live_turn_state()
         return True
 
 
@@ -1669,6 +2629,10 @@ def render_chat() -> None:
         st.warning("Agent not initialized.")
         return
 
+    if not st.session_state.get("_mermaid_prewarmed", False):
+        st.session_state["_mermaid_prewarmed"] = True
+        components.html(_build_prewarm_html(), height=1, scrolling=False)
+
     # ── Session state defaults ────────────────────────────
     for k, v in [
         ("_is_running", False),
@@ -1687,6 +2651,10 @@ def render_chat() -> None:
     # 전송 후 입력창 비우기 — 위젯 렌더링 전에 처리해야 함
     if st.session_state.pop("_clear_prompt", False):
         st.session_state["_prompt_area"] = ""
+    preset_prompt = st.session_state.pop("_preset_prompt", None)
+    if preset_prompt is not None:
+        st.session_state["_prompt_area"] = preset_prompt
+    live_turn = st.session_state.get("_live_turn_state") or {}
 
     # ── Page-level CSS ────────────────────────────────────
     st.markdown("""
@@ -1731,8 +2699,7 @@ def render_chat() -> None:
         color: #166534;
         line-height: 1.55;
         word-break: break-word;
-        max-height: 500px;
-        overflow-y: auto;
+        overflow: visible;
         box-shadow: 0 4px 14px rgba(22, 163, 74, .08);
     }
     .agent-bubble-label {
@@ -1762,7 +2729,7 @@ def render_chat() -> None:
     """, unsafe_allow_html=True)
 
     # ── Determine conversation state ─────────────────────
-    has_conversation = bool(st.session_state.chat_messages) or pending or is_running
+    has_conversation = bool(st.session_state.chat_messages) or pending or is_running or bool(live_turn)
 
     # ── 1. Main content area ─────────────────────────────
     graph_ph = st.empty()
@@ -1810,35 +2777,57 @@ def render_chat() -> None:
                 agent_style = _bubble_width_style(msg["content"], "agent")
                 st.markdown(
                     f"<div class='agent-bubble-label'>🤖 Agent</div>"
-                    f"<div class='agent-bubble' style='{agent_style}'>{safe_content}{model_html}</div>",
+                    f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{agent_style}'>{safe_content}{model_html}</div></div>",
                     unsafe_allow_html=True,
                 )
 
                 if msg.get("mermaid_def"):
-                    _hist_html = _build_page_html(
+                    _hist_html = msg.get("mermaid_html") or _build_page_html(
                         msg["mermaid_def"],
                         msg.get("mermaid_events", []),
                         False,
                         tooltips=msg.get("mermaid_tooltips", {}),
                     )
                     _h = max(350, 220 + msg.get("num_agents", 0) * 70)
-                    analysis_col, _ = st.columns([23, 2])
-                    with analysis_col:
-                        with st.expander("🔍 Agent 동작 분석", expanded=_is_latest_assistant):
-                            st.iframe(_hist_html, height=_h)
-                            _snap = msg.get("async_task_snapshot") or []
-                            if _snap:
-                                st.caption(f"Tracked async tasks at completion: {len(_snap)}")
-                                for _task in _snap[:4]:
-                                    st.caption(
-                                        f"- {_task.get('task_id', '')[:12]}... "
-                                        f"{_task.get('agent_type', 'unknown')} "
-                                        f"[{_task.get('status', 'unknown')}]"
-                                    )
+                    with st.expander("🔍 Agent 동작 분석", expanded=_is_latest_assistant):
+                        components.html(_hist_html, height=_h, scrolling=False)
+                        _history = msg.get("subagent_history_snapshot") or []
+                        if _history:
+                            st.caption(f"Tracked subagents at completion: {len(_history)}")
+                            for _row in _history[:6]:
+                                endpoint = str(_row.get("endpoint", "") or "")
+                                pid = _row.get("pid")
+                                state = str(_row.get("durable_state", "") or _row.get("status", "unknown"))
+                                lifecycle = " → ".join(
+                                    str(ev.get("state", "") or "")
+                                    for ev in (_row.get("lifecycle_events") or [])
+                                    if ev.get("state")
+                                )
+                                meta = endpoint
+                                if pid:
+                                    meta = f"{meta}<br>pid {pid}" if meta else f"pid {pid}"
+                                st.markdown(
+                                    "<div style='background:#fff;border:1px solid #d1d5db;border-radius:12px;"
+                                    "padding:8px 10px;margin:6px 0'>"
+                                    f"<div style='font-size:.84em;font-weight:700;color:#166534'>{_escape_html(str(_row.get('type', 'subagent')))} "
+                                    f"[{_escape_html(state)}]</div>"
+                                    f"<div style='font-size:.72em;color:#64748b'>{meta}</div>"
+                                    f"<div style='font-size:.78em;color:#334155;margin-top:4px'>{_escape_html(str(_row.get('task_summary', '') or _row.get('query', '') or ''))}</div>"
+                                    f"{f'<div style=\"font-size:.72em;color:#64748b;margin-top:4px\">{_escape_html(lifecycle)}</div>' if lifecycle else ''}"
+                                    "</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                checklist = msg.get("requirement_checklist") or []
+                prompt_label = msg.get("test_prompt_label")
+                if prompt_label and checklist:
+                    with st.expander(f"Requirements Checklist · {prompt_label}", expanded=_is_latest_assistant):
+                        for item, ok in checklist:
+                            st.markdown(f"{'✅' if ok else '⬜'} {item}")
 
                 st.markdown(
                     f"<div class='user-bubble-label'>👤 User</div>"
-                    f"<div class='user-bubble' style='{_bubble_width_style(_last_user_content, 'user')}'>{_escape_bubble_html(_last_user_content)}</div>",
+                    f"{_bubble_wrap_open('user')}<div class='user-bubble' style='{_bubble_width_style(_last_user_content, 'user')}'>{_escape_bubble_html(_last_user_content)}</div></div>",
                     unsafe_allow_html=True,
                 )
 
@@ -1847,37 +2836,88 @@ def render_chat() -> None:
 
         # ── Live interaction area (current pending/running) ──
         # Layout: Agent progress/answer → Mermaid analysis → User prompt.
-        if pending or is_running:
+        if pending or is_running or live_turn:
             st.markdown(
                 "<div class='agent-bubble-label'>🤖 Agent</div>",
                 unsafe_allow_html=True,
             )
             result_ph_ref["ph"] = st.empty()
-            if pending or is_running:
+            live_result = str(live_turn.get("result_text", "") or "")
+            live_model = str(live_turn.get("model", "") or "")
+            live_model_html = (
+                f"<div class='agent-bubble-model'>🧠 {_escape_html(live_model)}</div>"
+                if live_model else ""
+            )
+            if live_result:
                 result_ph_ref["ph"].markdown(
-                    f"<div class='agent-bubble' style='{_bubble_width_style('Thinking...', 'agent')}'>"
+                    f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{_bubble_width_style(live_result, 'agent')}'>"
+                    f"{_escape_bubble_html(live_result)}"
+                    f"{live_model_html}"
+                    "</div></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                result_ph_ref["ph"].markdown(
+                    f"{_bubble_wrap_open('agent')}<div class='agent-bubble' style='{_bubble_width_style('Thinking...', 'agent')}'>"
                     "Thinking...<div class='agent-bubble-model'>Waiting for model output</div>"
-                    "</div>",
+                    "</div></div>",
                     unsafe_allow_html=True,
                 )
 
-            st.markdown(
-                "<p style='margin:10px 0 4px;font-size:.8em;font-weight:700;"
-                "color:#64748b;letter-spacing:.4px'>🔍 AGENT 동작 분석</p>",
-                unsafe_allow_html=True,
-            )
-            analysis_col, _ = st.columns([23, 2])
-            with analysis_col:
+            with st.expander("🔍 Agent 동작 분석", expanded=True):
                 graph_ph = st.empty()
-                idle_def, tips = _build_mermaid([], True, pending or "")
-                _render_mermaid(graph_ph, idle_def, [], True, num_agents=0, tooltips=tips)
+                live_agents = live_turn.get("agents") or []
+                live_events = live_turn.get("events") or []
+                live_prompt = str(live_turn.get("prompt", "") or pending or "")
+                live_working = bool(live_turn.get("working", True))
+                idle_def, tips = _build_mermaid(
+                    live_agents,
+                    live_working,
+                    live_prompt,
+                    result_text=live_result if not live_working else "",
+                    model_name=live_model,
+                )
+                _render_mermaid(
+                    graph_ph,
+                    idle_def,
+                    live_events,
+                    live_working,
+                    num_agents=len(live_agents),
+                    tooltips=tips,
+                )
 
-            subagent_ph_ref["ph"] = st.empty()
+                subagent_ph_ref["ph"] = st.empty()
+                if live_agents:
+                    parts = [
+                        "<div style='margin:8px 0 14px'>"
+                        "<div style='font-size:.78em;font-weight:700;color:#64748b;letter-spacing:.35px;margin-bottom:6px'>"
+                        "SubAgent Streaming Output</div>"
+                    ]
+                    for row in live_agents:
+                        endpoint = row.get("endpoint") or ""
+                        pid = row.get("pid")
+                        model = row.get("model") or ""
+                        status = row.get("durable_state") or row.get("status", "running")
+                        content = row.get("live_output") or row.get("result_summary") or "waiting for output..."
+                        parts.append(
+                            "<div style='background:#fff;border:1px solid #bbf7d0;border-radius:14px;"
+                            "padding:10px 12px;margin-bottom:8px;box-shadow:0 4px 14px rgba(22,163,74,.05)'>"
+                            f"<div style='font-size:.8em;font-weight:700;color:#166534;margin-bottom:4px'>{_escape_html(row.get('type','subagent'))}</div>"
+                            f"<div style='font-size:.72em;color:#64748b;margin-bottom:6px'>{_escape_html(str(endpoint))}"
+                            f"{f'<br>pid {pid}' if pid else ''}"
+                            f"{f'<br>model { _escape_html(str(model)) }' if model else ''} · {_escape_html(str(status))}</div>"
+                            f"<div style='font-size:.88em;color:#14532d;white-space:pre-wrap;max-height:180px;overflow-y:auto'>{_escape_bubble_html(str(content))}</div>"
+                            "</div>"
+                        )
+                    parts.append("</div>")
+                    subagent_ph_ref["ph"].markdown("".join(parts), unsafe_allow_html=True)
+                else:
+                    subagent_ph_ref["ph"] = st.empty()
 
-            prompt_display = pending or "(processing…)"
+            prompt_display = live_prompt or pending or "(processing…)"
             st.markdown(
                 f"<div class='user-bubble-label'>👤 User</div>"
-                f"<div class='user-bubble' style='{_bubble_width_style(prompt_display, 'user')}'>{_escape_bubble_html(prompt_display)}</div>",
+                f"{_bubble_wrap_open('user')}<div class='user-bubble' style='{_bubble_width_style(prompt_display, 'user')}'>{_escape_bubble_html(prompt_display)}</div></div>",
                 unsafe_allow_html=True,
             )
         else:
@@ -1889,61 +2929,71 @@ def render_chat() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Prompt 프리셋 버튼 ────────────────────────────────
-    st.markdown(
-        "<p style='margin:4px 0 6px;font-size:.8em;font-weight:700;"
-        "color:#64748b;letter-spacing:.4px'>📌 PROMPT</p>",
-        unsafe_allow_html=True,
-    )
-    tp_cols = st.columns(len(TEST_PROMPTS))
-    for i, (label, p) in enumerate(TEST_PROMPTS.items()):
-        with tp_cols[i]:
+    def _queue_current_prompt() -> None:
+        raw = str(st.session_state.get("_prompt_area", "") or "").strip()
+        if not raw or st.session_state.get("_is_running"):
+            return
+        matched_label = next(
+            (label for label, prompt_text in TEST_PROMPTS.items() if prompt_text == raw),
+            None,
+        )
+        st.session_state["_active_test_prompt_label"] = matched_label
+        st.session_state["_pending_prompt"] = raw
+        st.session_state["_clear_prompt"] = True
+
+    show_test_prompts = st.toggle("Test Prompt", key="_show_test_prompts", value=False)
+    if show_test_prompts:
+        st.markdown("<div style='background:#fff;padding:2px 0 0'>", unsafe_allow_html=True)
+        for label, prompt_text in TEST_PROMPTS.items():
+            st.caption(TEST_PROMPT_DETAILS.get(label, ""))
             if st.button(
-                f"▶ {label}",
+                label,
                 key=f"test_{label}",
                 use_container_width=True,
                 disabled=is_running,
             ):
-                st.session_state["_prompt_area"] = p
+                st.session_state["_preset_prompt"] = prompt_text
+                st.session_state["_active_test_prompt_label"] = label
                 st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 질의 입력창 카드 ──────────────────────────────────
-    with st.container(border=True):
-        user_input = st.text_area(
+    input_col, stop_col, send_col = st.columns([12, 1, 1])
+    with input_col:
+        st.text_input(
             "prompt",
             key="_prompt_area",
-            height=80,
             disabled=is_running,
             label_visibility="collapsed",
             placeholder="Ask me anything about coding…",
+            on_change=_queue_current_prompt,
         )
-        action_spacer, stop_col, send_col = st.columns([4, 1, 1])
-        with stop_col:
-            stop_clicked = st.button(
-                "⏹ Stop",
-                use_container_width=True,
-                disabled=not is_running,
-                type="secondary",
-            )
-        with send_col:
-            send_clicked = st.button(
-                "🚀 Send",
-                use_container_width=True,
-                disabled=is_running,
-                type="primary",
-            )
+    with stop_col:
+        stop_clicked = st.button(
+            "■",
+            key="stop_icon_button",
+            use_container_width=True,
+            disabled=not is_running,
+            type="secondary",
+        )
+    with send_col:
+        send_clicked = st.button(
+            "↑",
+            key="send_icon_button",
+            use_container_width=True,
+            disabled=is_running,
+            type="primary",
+        )
+
     if send_clicked:
-        if user_input and user_input.strip():
-            st.session_state["_pending_prompt"] = user_input.strip()
-            st.session_state["_clear_prompt"] = True
+        _queue_current_prompt()
+        if st.session_state.get("_pending_prompt"):
             st.rerun()
-        else:
-            st.info("메시지를 입력한 뒤 Send를 눌러주세요.")
+        st.info("메시지를 입력한 뒤 전송하세요.")
     if stop_clicked:
         st.session_state["_stop_requested"] = True
         st.rerun()
 
-    # ── Pending prompt 실행 ───────────────────────────────
+    # ── Pending prompt 실행 / Async monitor resume ───────────────────────────────
     if pending:
         st.session_state["_refresh_requested"] = False
         st.session_state["_stop_requested"] = False
@@ -1952,8 +3002,13 @@ def render_chat() -> None:
         try:
             completed = _stream_response(pending, graph_ph, result_ph_ref["ph"], subagent_ph_ref["ph"])
         finally:
-            st.session_state["_is_running"] = False
-            st.session_state["_has_result"] = completed
+            if not st.session_state.get("_monitor_async_after_answer"):
+                st.session_state["_is_running"] = False
+                st.session_state["_has_result"] = completed
             st.session_state["_stop_requested"] = False
-            # ★ 실행 완료 후 rerun → 입력창 활성화 + New Chat 활성화
-            st.rerun()
+            if not st.session_state.get("_monitor_async_after_answer"):
+                # 실행 완료 후 rerun → 입력창 활성화
+                st.rerun()
+    elif st.session_state.get("_monitor_async_after_answer"):
+        st.session_state["_is_running"] = True
+        _resume_async_monitoring(graph_ph, result_ph_ref["ph"], subagent_ph_ref["ph"])

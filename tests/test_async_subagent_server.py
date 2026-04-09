@@ -75,7 +75,9 @@ class AsyncSubagentServerTests(unittest.TestCase):
             status_resp = client.get(f"/threads/{thread_id}/runs/{run_id}")
             self.assertEqual(status_resp.status_code, 200)
             self.assertEqual(status_resp.json()["status"], "success")
-            self.assertEqual(status_resp.json()["partial_output"], "Here are the coding results.")
+            partial_output = status_resp.json()["partial_output"]
+            self.assertIn("[status] subagent started", partial_output)
+            self.assertIn("Here are the coding results.", partial_output)
 
             thread_resp = client.get(f"/threads/{thread_id}")
             self.assertEqual(thread_resp.status_code, 200)

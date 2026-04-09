@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -132,11 +133,16 @@ def create_remote_coding_agent(
     custom_settings: Settings | None = None,
     *,
     cwd=None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     cfg = custom_settings or settings
     if not cfg.langgraph_deployment_url:
         raise RuntimeError(
             "single deployment topology requires LANGGRAPH_DEPLOYMENT_URL to point at a running langgraph deployment."
+        )
+    if progress_cb:
+        progress_cb(
+            f"Creating remote LangGraph adapter ({cfg.langgraph_deployment_url}, assistant={cfg.langgraph_assistant_id})"
         )
 
     runtime = LocalAsyncSubagentManager(
@@ -144,6 +150,8 @@ def create_remote_coding_agent(
         root_dir=cwd,
         topology="single",
     )
+    if progress_cb:
+        progress_cb("Building remote AsyncSubAgent specs")
     fallback = RemoteFallbackStatus()
     agent = RemoteLangGraphAgent(cfg.langgraph_deployment_url, cfg.langgraph_assistant_id)
     return {

@@ -12,11 +12,20 @@ class _FakeRuntime:
         self.topology = topology
         self.error = error
         self.started: list[str] = []
+        self.created: list[tuple[str, str]] = []
+        self.noted: list[tuple[str, str]] = []
+
+    def begin_task(self, role: str, task_summary: str, parent_id: str = "main-agent") -> str:
+        self.created.append((role, task_summary))
+        return "sa_test"
 
     def ensure_started(self, name: str) -> None:
         if self.error is not None:
             raise self.error
         self.started.append(name)
+
+    def note_runtime_state(self, role: str, *, state: str, task_summary: str = "", error: str = "") -> None:
+        self.noted.append((role, state))
 
 
 class _FakeRequest:
@@ -40,6 +49,8 @@ class LazyAsyncSubagentsMiddlewareTests(unittest.TestCase):
         result = middleware.wrap_tool_call(request, lambda req: ToolMessage(content="ok", tool_call_id=req.tool_call["id"]))
 
         self.assertEqual(runtime.started, ["researcher"])
+        self.assertEqual(runtime.created, [("researcher", "investigate")])
+        self.assertEqual(runtime.noted[-1], ("researcher", "running"))
         self.assertEqual(result.content, "ok")
 
     def test_non_start_tool_does_not_start_runtime(self) -> None:
@@ -61,6 +72,7 @@ class LazyAsyncSubagentsMiddlewareTests(unittest.TestCase):
         self.assertIsInstance(result, ToolMessage)
         self.assertEqual(result.status, "error")
         self.assertIn("Failed to prepare async subagent `coder`", str(result.content))
+        self.assertEqual(runtime.noted[-1], ("coder", "failed"))
 
     def test_single_topology_skips_lazy_start(self) -> None:
         runtime = _FakeRuntime(topology="single")
