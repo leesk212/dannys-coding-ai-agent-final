@@ -100,6 +100,28 @@ TEST_PROMPTS = {
         "모델 정책 증빙 테스트다. 현재 사용 중인 모델 식별자를 말하고, "
         "OpenRouter 우선 사용 여부, fallback 모델, tool calling/긴 문맥/모델 전환 제약을 요약해라."
     ),
+    "산출물 인풋": (
+        "## Task\n\n"
+        "PMS (project manage system) 시스템을 구성하는 프로젝트.\n\n"
+        "## Process\n\n"
+        "1. PRD 파일을 만들고\n"
+        "2. PRD 파일을 기반으로 작업을 원자 단위 작업으로 분해할 것.\n"
+        "3. 작업에 대한 명세는 구체적이어야하며, 추상적인 문구를 배제하고 확실히 개발 방향을 명시할 것.\n"
+        "4. 개발 명세서를 Spec Driven Development 기반으로 도출할 것.\n"
+        "5. 위 내용으로 도출된 개발 명세서를 기반으로 개발 작업을 수행할 것.\n"
+        "(단, Test Driven Development 방식으로 개발하는 것을 필히 준수해야함)\n\n"
+        "## 세부 요구사항\n"
+        "1. 사용자 : it 회사의 프로젝트을 수행하는 PM\n"
+        "2. 관리자 : it 회사의 임원 및 PMO 조직\n"
+        "3. 웹, 모바일에서 접속 가능\n"
+        "4. 사용자는 프로젝트 정보를 입력한다. (프로젝트명, 프로젝트코드, 고객사, 설계자, 개발자, 프로젝트 일정)\n"
+        "5. 관리자는 등록된 프로젝트와 일자를 관리한다.\n"
+        "6. 사용자가 사용하기 편하게 해야 한다.\n"
+        "7. 기본적으로 간트 차트 기능이 구현되어야 한다.\n\n"
+        "이 요청은 PRD, atomic task breakdown, spec-driven development, TDD, web/mobile, "
+        "frontend/backend 분리를 포함하므로 planner, architect, frontend, mobile, backend, reviewer "
+        "같은 async subagent를 적절히 사용해서 진행하고, 최종적으로는 실행 가능한 코드 산출물까지 포함해라."
+    ),
 }
 
 TEST_PROMPT_DETAILS = {
@@ -113,6 +135,7 @@ TEST_PROMPT_DETAILS = {
     "Blocked/Failed": "blocked 또는 failed 상태 감지와 alternate path 정책을 검증합니다.",
     "Loop Safety": "timeout, 무진전, tool 오류, safe stop 같은 복원력 정책을 검증합니다.",
     "Model Policy": "현재 모델, fallback, 제약사항이 설명 가능한지 검증합니다.",
+    "산출물 인풋": "PMS 프로젝트형 요청을 입력해 planner, architect, frontend, mobile, backend, reviewer 분할과 실행 가능한 코드 산출까지 유도하는 테스트입니다.",
 }
 
 BLOCKED_AFTER_SECONDS = 45.0

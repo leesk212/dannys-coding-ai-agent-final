@@ -3,12 +3,28 @@
 import os
 import streamlit as st
 
+from coding_agent.agent import BASE_SYSTEM_PROMPT
 from coding_agent.async_subagent_manager import get_default_subagent_system_prompts
 from coding_agent.config import ModelSpec, settings
 
 
 def render_settings() -> None:
     st.title("⚙️ Settings")
+
+    st.subheader("🧠 Main Agent System Prompt")
+    st.caption("The default Main Agent system prompt is shown below. Any override is appended to it and applied after agent reinitialization.")
+
+    with st.expander("Default Main Agent System Prompt", expanded=True):
+        st.code(BASE_SYSTEM_PROMPT, language="text")
+
+    current_main_override = st.text_area(
+        "Main Agent System Prompt Override",
+        value=settings.main_system_prompt_override,
+        height=260,
+        help="Use this to add project-specific supervisor rules.",
+    )
+
+    st.markdown("---")
 
     # API Keys
     st.subheader("🔑 API Keys")
@@ -124,16 +140,10 @@ def render_settings() -> None:
             st.error(f"Cannot connect to Ollama: {e}")
 
     st.markdown("---")
-    st.subheader("🧩 Agent System Prompts")
-    st.caption("Main Agent and each SubAgent system prompt can be overridden here. Changes apply after reinitialization.")
+    st.subheader("🧩 SubAgent System Prompts")
+    st.caption("Each SubAgent system prompt can be overridden here. Changes apply after reinitialization.")
 
     prompt_defaults = get_default_subagent_system_prompts()
-    current_main_override = st.text_area(
-        "Main Agent Prompt Override",
-        value=settings.main_system_prompt_override,
-        height=220,
-        help="Appended to the default Main Agent system prompt.",
-    )
 
     prompt_inputs: dict[str, str] = {}
     for name, default_prompt in prompt_defaults.items():
@@ -315,22 +325,21 @@ def render_settings() -> None:
         components = st.session_state.agent_components
         if components:
             st.markdown("---")
-            st.subheader("📊 Current Status")
+            if st.toggle("📊 Current Runtime Status", value=False):
+                fallback = components["fallback_middleware"]
+                status = fallback.get_status()
+                st.caption(f"Topology: `{components.get('deployment_topology', settings.deployment_topology)}`")
+                st.caption(f"Fallback mode: `{settings.fallback_mode}`")
 
-            fallback = components["fallback_middleware"]
-            status = fallback.get_status()
-            st.caption(f"Topology: `{components.get('deployment_topology', settings.deployment_topology)}`")
-            st.caption(f"Fallback mode: `{settings.fallback_mode}`")
-
-            for m in status["models"]:
-                icon = (
-                    "🟢"
-                    if m["circuit_state"] == "closed"
-                    else "🔴"
-                    if m["circuit_state"] == "open"
-                    else "🟡"
-                )
-                st.markdown(
-                    f"{icon} **{m['name']}** ({m['provider']}) - "
-                    f"Circuit: {m['circuit_state']}, Failures: {m['failure_count']}"
-                )
+                for m in status["models"]:
+                    icon = (
+                        "🟢"
+                        if m["circuit_state"] == "closed"
+                        else "🔴"
+                        if m["circuit_state"] == "open"
+                        else "🟡"
+                    )
+                    st.markdown(
+                        f"{icon} **{m['name']}** ({m['provider']}) - "
+                        f"Circuit: {m['circuit_state']}, Failures: {m['failure_count']}"
+                    )
