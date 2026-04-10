@@ -1,4 +1,8 @@
-# Coding AI Agent v2
+# Danny's Coding AI Agent
+
+
+![intro](https://github.com/user-attachments/assets/b7343e8c-0648-47b9-b0dd-c59df21827c3)
+
 
 `DeepAgents` 개념을 기준선으로 삼아, 실제 개발 작업을 지속적으로 수행하는 코딩 에이전트를 구현한 프로젝트다.  
 핵심 설계 축은 다음 3가지다.
@@ -9,8 +13,8 @@
 
 ## 빠른 목차
 
-- [실행 방법](#실행-방법)
 - [데모 GIF](#데모-gif)
+- [설치 방법](#설치-방법)
 - [평가 기준 대응](#평가-기준-대응)
 - [핵심 산출물 요약](#핵심-산출물-요약)
 - [현재 구조](#현재-구조)
@@ -30,12 +34,59 @@
 - [Docker 실행](#docker-실행)
 - [검증 방법](#검증-방법)
 
-## 실행 방법
+## 데모 GIF
 
-### 로컬 실행
+아래 3개 동작 화면을 이 섹션에 배치하면 된다.
+
+### 1. Hello
+
+![hello](https://github.com/user-attachments/assets/f737c7fc-4a92-4f5d-8502-763666148725)
+
+
+### 2. Code+Review
+
+```md
+![Code+Review Demo](docs/gifs/code-review.gif)
+```
+
+### 3. Scenario (PMS시스템구성)
+
+```md
+![Scenario Demo](docs/gifs/scenario-pms.gif)
+```
+
+## 설치 방법
+
+### 1. Docker 이미지 바로 실행 (권장)
+
+이미지 pull 후 바로 실행:
 
 ```bash
-cd /mnt/c/Users/SDS/Subject
+docker pull leesk212/coding-ai-agent-v5:latest
+docker run -d \
+  --name coding-ai-agent \
+  -p 8501:8501 \
+  -e MEMORY_DIR=/data/memory \
+  -e STATE_DIR=/data/state \
+  -e DEEPAGENTS_DEPLOYMENT_TOPOLOGY=split \
+  -e MAX_SUBAGENTS=30 \
+  -v $(pwd)/workspace:/workspace \
+  -v coding-agent-memory:/data/memory \
+  -v coding-agent-state:/data/state \
+  -v coding-agent-deepagents:/root/.deepagents \
+  -w /workspace \
+  leesk212/coding-ai-agent-v5:latest
+```
+
+브라우저:
+
+- `http://localhost:8501`
+
+### 2. 로컬 실행
+
+```bash
+git clone https://github.com/leesk212/coding-ai-agent-v2.git
+cd coding-ai-agent-v2
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -55,38 +106,10 @@ python -m coding_agent
 5. DeepAgents runtime initialize
 6. Chat 진입
 
-### Docker 실행
+### 3. Docker Compose 빌드 실행
 
 ```bash
 docker compose up --build
-```
-
-또는 이미 올린 이미지 사용:
-
-```bash
-docker run -p 8501:8501 --env-file .env leesk212/coding-ai-agent-v2:latest
-```
-
-## 데모 GIF
-
-아래 3개 동작 화면을 이 섹션에 배치하면 된다.
-
-### 1. Hello
-
-```md
-![Hello Demo](docs/gifs/hello.gif)
-```
-
-### 2. Code+Review
-
-```md
-![Code+Review Demo](docs/gifs/code-review.gif)
-```
-
-### 3. Scenario (PMS시스템구성)
-
-```md
-![Scenario Demo](docs/gifs/scenario-pms.gif)
 ```
 
 ## 평가 기준 대응
@@ -110,6 +133,7 @@ docker run -p 8501:8501 --env-file .env leesk212/coding-ai-agent-v2:latest
 - `memory_store`, `memory_search`, `memory_correct` 도구 제공
 - system prompt에 “대화에서 durable memory를 추출하고 같은 turn에서 저장” 규칙 추가
 - durable store(SQLite) + semantic store(ChromaDB) 병행 사용
+- **Remember SubAgent가 Human in the Loop 단계에서 파일별 계층/근거/저장 내용을 구조화된 JSON으로 제안**하여, 사람이 각 계층에 어떤 파일을 왜 넣을지 검토 후 편집/승인 가능
 
 ### 3. 서브에이전트 시스템 동적 활용 여부 (10점)
 
@@ -122,7 +146,7 @@ docker run -p 8501:8501 --env-file .env leesk212/coding-ai-agent-v2:latest
 
 | 평가 항목 | 현재 상태 | 근거 |
 | --- | --- | --- |
-| SLM 사용 포함 여부 | 충족 | Ollama 기반 local fallback model 경로 존재 |
+| SLM 사용 포함 여부 | 충족 | Ollama 기반 local fallback model 경로 존재 (`langchain-ollama` + `langchain-community` 정식 dependency로 포함) |
 | Main/SubAgent 등 모든 Agent 로직 최적화 여부 | 충족 | Main Agent와 SubAgent 모두 동일한 모델 fallback 체계와 local SLM 경로를 공유하며, 필요 시 local SLM까지 포함해 일관되게 최적화 가능 |
 | SLM을 전혀 사용하지 않는지 | 미해당 | 이 프로젝트는 SLM 경로를 실제로 포함하고 활용할 수 있도록 구성됨 |
 
@@ -135,9 +159,9 @@ docker run -p 8501:8501 --env-file .env leesk212/coding-ai-agent-v2:latest
 이 프로젝트는 단순 CRUD 코드 생성 데모가 아니라, 아래 구조를 가진 실행형 코딩 에이전트다.
 
 - Main Agent: `DeepAgents supervisor`
-- SubAgent: `AsyncSubAgent` 기반 동적 런타임 생성
-- 장기 메모리: `ChromaDB + SQLite durable memory`
-- Human in the Loop: `remember` SubAgent 결과에 대한 중간 승인
+- SubAgent: `AsyncSubAgent` 기반 동적 런타임 생성 (동시 최대 30개 프로세스)
+- 장기 메모리: `ChromaDB + SQLite durable memory` + 3계층(`user/profile`, `project/context`, `domain/knowledge`)
+- Human in the Loop: `remember` SubAgent가 파일별 계층/근거/저장 내용을 제안 → 사람이 편집/승인
 - WebUI: Streamlit 기반 실시간 Mermaid/이벤트/SubAgent output 표시
 - 실행 단위: 질의 1개 = Main Agent + 관련 SubAgent + HITL까지 포함한 하나의 세션
 
@@ -159,19 +183,19 @@ Streamlit WebUI
 
 리뷰 시작 시 우선 보면 되는 파일은 아래 7개다.
 
-1. [src/coding_agent/runtime.py](/mnt/c/Users/SDS/Subject/src/coding_agent/runtime.py)
-2. [src/coding_agent/agent.py](/mnt/c/Users/SDS/Subject/src/coding_agent/agent.py)
-3. [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS/Subject/src/coding_agent/async_subagent_manager.py)
-4. [src/coding_agent/async_subagent_server.py](/mnt/c/Users/SDS/Subject/src/coding_agent/async_subagent_server.py)
-5. [src/coding_agent/middleware/long_term_memory.py](/mnt/c/Users/SDS/Subject/src/coding_agent/middleware/long_term_memory.py)
-6. [src/coding_agent/state/store.py](/mnt/c/Users/SDS/Subject/src/coding_agent/state/store.py)
-7. [src/coding_agent/webui/_pages/chat.py](/mnt/c/Users/SDS/Subject/src/coding_agent/webui/_pages/chat.py)
+1. [src/coding_agent/runtime.py](src/coding_agent/runtime.py)
+2. [src/coding_agent/agent.py](src/coding_agent/agent.py)
+3. [src/coding_agent/async_subagent_manager.py](src/coding_agent/async_subagent_manager.py)
+4. [src/coding_agent/async_subagent_server.py](src/coding_agent/async_subagent_server.py)
+5. [src/coding_agent/middleware/long_term_memory.py](src/coding_agent/middleware/long_term_memory.py)
+6. [src/coding_agent/state/store.py](src/coding_agent/state/store.py)
+7. [src/coding_agent/webui/_pages/chat.py](src/coding_agent/webui/_pages/chat.py)
 
 ## Agent 설정은 어디서 하나
 
 ### 1. 런타임 진입점
 
-메인 진입점은 [src/coding_agent/runtime.py](/mnt/c/Users/SDS/Subject/src/coding_agent/runtime.py)의 `create_runtime_components(...)`다.
+메인 진입점은 [src/coding_agent/runtime.py](src/coding_agent/runtime.py)의 `create_runtime_components(...)`다.
 
 여기서 하는 일:
 
@@ -188,7 +212,7 @@ Streamlit WebUI
 
 ### 2. Main Agent 조립
 
-Main Supervisor는 [src/coding_agent/agent.py](/mnt/c/Users/SDS/Subject/src/coding_agent/agent.py)의 `create_coding_agent(...)` 계열 함수에서 조립된다.
+Main Supervisor는 [src/coding_agent/agent.py](src/coding_agent/agent.py)의 `create_coding_agent(...)` 계열 함수에서 조립된다.
 
 조립 순서:
 
@@ -209,7 +233,7 @@ Main Supervisor는 [src/coding_agent/agent.py](/mnt/c/Users/SDS/Subject/src/codi
 
 ### 3. AsyncSubAgent spec 로딩
 
-SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS/Subject/src/coding_agent/async_subagent_manager.py)에 있다.
+SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](src/coding_agent/async_subagent_manager.py)에 있다.
 
 핵심 계층:
 
@@ -243,7 +267,7 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 - `mobile`: mobile UX/flow
 - `backend`: DB/API/domain logic
 - `reviewer`: 코드/산출물 검토
-- `remember`: 장기 메모리 후보 파일 선별
+- `remember`: 장기 메모리 후보 파일 선별 + 파일별 계층 추천 + 저장 노트 초안
 
 ## SubAgent는 언제 실제로 뜨나
 
@@ -252,16 +276,16 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 실행 시점:
 
 1. Main Agent가 `start_async_task`를 선택
-2. [src/coding_agent/middleware/lazy_async_subagents.py](/mnt/c/Users/SDS/Subject/src/coding_agent/middleware/lazy_async_subagents.py)가 개입
+2. [src/coding_agent/middleware/lazy_async_subagents.py](src/coding_agent/middleware/lazy_async_subagents.py)가 개입
 3. `LocalAsyncSubagentManager.ensure_started(name)` 호출
 4. 해당 역할의 SubAgent 프로세스만 spawn
 5. health check 통과 후 task 실행
 
-즉, 동적 생성이다. 고정 2-agent 선언이 아니다.
+즉, 동적 생성이다. 고정 2-agent 선언이 아니다. 동시 실행 한도는 `MAX_SUBAGENTS` 환경변수로 조정되며 기본값은 `30`이다.
 
 ## SubAgent 프로세스 내부
 
-실제 SubAgent 서버는 [src/coding_agent/async_subagent_server.py](/mnt/c/Users/SDS/Subject/src/coding_agent/async_subagent_server.py)에서 실행된다.
+실제 SubAgent 서버는 [src/coding_agent/async_subagent_server.py](src/coding_agent/async_subagent_server.py)에서 실행된다.
 
 핵심:
 
@@ -272,7 +296,7 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 
 ## 사용자 질의 1개가 처리되는 방식
 
-질의 단위 orchestration은 [src/coding_agent/webui/_pages/chat.py](/mnt/c/Users/SDS/Subject/src/coding_agent/webui/_pages/chat.py)의 `_stream_response(...)`와 `_resume_async_monitoring(...)`에서 수행된다.
+질의 단위 orchestration은 [src/coding_agent/webui/_pages/chat.py](src/coding_agent/webui/_pages/chat.py)의 `_stream_response(...)`와 `_resume_async_monitoring(...)`에서 수행된다.
 
 흐름:
 
@@ -283,8 +307,8 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 5. `start_async_task`가 나오면 local `tracked_agents` 등록
 6. SubAgent output과 state를 고빈도 polling
 7. remember SubAgent 필요 시 강제 launch
-8. remember 결과가 나오면 Human in the Loop pause
-9. 승인/거절 후 같은 세션에서 resume
+8. remember 결과(JSON 계층 추천 포함)가 나오면 Human in the Loop pause
+9. 사람이 파일별 계층/근거/저장 내용을 편집 후 승인/거절 → 같은 세션에서 resume
 10. 마지막에만 Main Agent가 최종 aggregation
 
 중요:
@@ -298,16 +322,16 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 
 핵심 파일:
 
-- [src/coding_agent/middleware/long_term_memory.py](/mnt/c/Users/SDS/Subject/src/coding_agent/middleware/long_term_memory.py)
-- [src/coding_agent/memory/store.py](/mnt/c/Users/SDS/Subject/src/coding_agent/memory/store.py)
-- [src/coding_agent/memory/categories.py](/mnt/c/Users/SDS/Subject/src/coding_agent/memory/categories.py)
-- [src/coding_agent/state/store.py](/mnt/c/Users/SDS/Subject/src/coding_agent/state/store.py)
+- [src/coding_agent/middleware/long_term_memory.py](src/coding_agent/middleware/long_term_memory.py)
+- [src/coding_agent/memory/store.py](src/coding_agent/memory/store.py)
+- [src/coding_agent/memory/categories.py](src/coding_agent/memory/categories.py)
+- [src/coding_agent/state/store.py](src/coding_agent/state/store.py)
 
 메모리 계층:
 
-1. `user/profile`
-2. `project/context`
-3. `domain/knowledge`
+1. `user/profile` — 사용자 코딩 스타일, 언어/포맷 선호, 응답 방식 규칙
+2. `project/context` — 프로젝트 구조, 아키텍처 결정, 모듈 경계, 스택/의존성/팀 규칙
+3. `domain/knowledge` — 비즈니스 규칙, 도메인 사실, API 계약, 재사용 가능한 기술 패턴
 
 구조:
 
@@ -340,38 +364,58 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 
 ## Remember Agent + Human in the Loop
 
-이번 업데이트에서 `remember` SubAgent와 중간 승인 흐름을 붙였다.
+`remember` SubAgent와 중간 승인 흐름. 이번 업데이트에서 **파일별 계층 추천 + 사람 편집** 단계를 붙였다.
 
 목적:
 
-1. 산출물 중 장기 메모리화 가치가 높은 파일 후보 선별
-2. 후보 최대 10개로 축소
-3. 사람이 승인
-4. 승인된 파일만 long-term memory 저장
+1. 산출물 중 장기 메모리화 가치가 높은 파일 후보 선별 (최대 10개)
+2. 각 파일을 어느 메모리 계층에 넣을지 **근거와 함께** 추천
+3. 사람이 계층/근거/저장 내용을 **편집** 후 승인
+4. 승인된 파일만 파일별 계층 + 편집된 내용으로 long-term memory 저장
 
-동작:
+Remember SubAgent가 내는 출력 스키마:
 
-1. turn에서 durable artifact 생성
-2. `remember` SubAgent 실행
-3. 후보 파일 목록 생성
-4. Main Agent 최종 답변 전에 `Human in the Loop` pause
-5. WebUI에서 파일별 다운로드 검토
-6. `Approve and Continue` 또는 `Reject and Continue`
-7. 같은 세션을 resume
-8. 그 뒤에만 최종 Main Agent 답변 생성
+```json
+{
+  "recommendations": [
+    {
+      "path": "relative/path/to/file.md",
+      "recommended_layer": "user/profile | project/context | domain/knowledge",
+      "rationale": "왜 이 계층에 들어가야 하는지 설명",
+      "suggested_memory_content": "메모리에 실제로 저장할 축약 노트(≤800자)"
+    }
+  ]
+}
+```
+
+HITL UI 동작:
+
+1. Main Agent가 최종 답변을 내기 전 `remember` SubAgent가 강제 실행
+2. 파서가 JSON 블록을 추출해 후보 목록 구성 (실패 시 텍스트 파싱 fallback)
+3. WebUI가 파일을 계층별로 그룹핑하여 표시
+   - 계층별 정의/가이드를 상단에 안내
+   - 파일별 근거와 제안된 저장 노트를 함께 노출
+4. 각 파일에 대해 사람이 아래를 **편집**할 수 있음
+   - Memory layer (selectbox)
+   - Rationale (text_area)
+   - 저장될 메모리 노트 본문 (text_area, 비우면 파일 원문으로 fallback)
+5. `Approve and Continue` / `Reject and Continue`
+6. 승인 시 각 파일이 **자기 계층과 편집된 내용**으로 Chroma + SQLite에 저장됨 (`human_edited` 태그 부착)
+7. 같은 세션을 resume하여 Main Agent 최종 답변 생성
 
 핵심 파일:
 
-- [src/coding_agent/agent.py](/mnt/c/Users/SDS/Subject/src/coding_agent/agent.py)
-- [src/coding_agent/webui/_pages/chat.py](/mnt/c/Users/SDS/Subject/src/coding_agent/webui/_pages/chat.py)
+- [src/coding_agent/async_subagent_manager.py](src/coding_agent/async_subagent_manager.py) — remember SubAgent system prompt
+- [src/coding_agent/webui/_pages/chat.py](src/coding_agent/webui/_pages/chat.py) — `_parse_remember_candidates_from_history`, `_render_remember_review_form`, `_store_approved_memory_files`
+- [src/coding_agent/middleware/long_term_memory.py](src/coding_agent/middleware/long_term_memory.py)
 
-## SubAgent 수명주기
+## 동적 SubAgent 수명주기 관리
 
 핵심 파일:
 
-- [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS/Subject/src/coding_agent/async_subagent_manager.py)
-- [src/coding_agent/middleware/subagent_lifecycle.py](/mnt/c/Users/SDS/Subject/src/coding_agent/middleware/subagent_lifecycle.py)
-- [src/coding_agent/state/store.py](/mnt/c/Users/SDS/Subject/src/coding_agent/state/store.py)
+- [src/coding_agent/async_subagent_manager.py](src/coding_agent/async_subagent_manager.py)
+- [src/coding_agent/middleware/subagent_lifecycle.py](src/coding_agent/middleware/subagent_lifecycle.py)
+- [src/coding_agent/state/store.py](src/coding_agent/state/store.py)
 
 수명주기 상태:
 
@@ -405,28 +449,35 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 - `model`
 - lifecycle event summary
 
-## Agentic Loop 복원력
+## Agentic Loop 복원력과 안전성
 
 핵심 파일:
 
-- [src/coding_agent/resilience.py](/mnt/c/Users/SDS/Subject/src/coding_agent/resilience.py)
-- [src/coding_agent/agent.py](/mnt/c/Users/SDS/Subject/src/coding_agent/agent.py)
-- [src/coding_agent/webui/_pages/chat.py](/mnt/c/Users/SDS/Subject/src/coding_agent/webui/_pages/chat.py)
+- [src/coding_agent/resilience.py](src/coding_agent/resilience.py)
+- [src/coding_agent/agent.py](src/coding_agent/agent.py)
+- [src/coding_agent/webui/_pages/chat.py](src/coding_agent/webui/_pages/chat.py)
 
 현재 반영된 방어 전략:
 
-- model timeout / fallback
+- model timeout / fallback (primary → OpenRouter 대체 모델 → local Ollama SLM)
 - no-progress loop guard
 - bad tool-call 대응
-- subagent failure / blocked 대응
+- subagent failure / blocked 대응 (alternate role 자동 재시도)
 - safe stop
 
 현재 loop 관련 설정:
 
 - `max_iterations = 10000`
-- `max_subagents = 100`
+- `max_subagents = 100` (하드 리밋, 환경변수 `MAX_SUBAGENTS`로 실사용 리밋 조정 — 기본 30)
 
-## WebUI에서 보이는 것
+## 모델 정책
+
+- Primary: OpenRouter 기반 오픈소스 대형 모델 우선
+- Fallback: 동일 provider 내 대체 모델 → `langchain-ollama` 기반 local SLM (`qwen2.5-coder:7b` 등)
+- `langchain-ollama` + `langchain-community`를 정식 dependency로 포함하여 fallback 경로에서 `ModuleNotFoundError`로 터지지 않음
+- Main Agent와 SubAgent가 동일 fallback 체계를 공유
+
+## WebUI 핵심 기능
 
 현재 Chat UI는 다음을 보여준다.
 
@@ -437,7 +488,7 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
   - HITL 상태
   - SubAgent Streaming Output
 - workspace 다운로드
-- remember review
+- remember review (파일별 계층/근거/노트 편집 UI)
 - 개별 파일 다운로드
 - Memory / Settings / Chat 페이지 전환
 
@@ -448,7 +499,7 @@ SubAgent 정의는 [src/coding_agent/async_subagent_manager.py](/mnt/c/Users/SDS
 - HITL 시 자동 스크롤
 - SubAgent 최신 활동 기준 정렬
 
-## 질의별 작업 디렉터리
+### 질의별 작업 디렉터리
 
 각 사용자 질의는 별도 workdir에서 실행된다.
 
@@ -464,7 +515,7 @@ query_sessions/YYYYMMDD_HHMMSS
 - 산출물, PRD, 코드, spec, 문서가 질의 단위로 분리됨
 - 완료 후 해당 workdir을 zip으로 다운로드 가능
 
-## Settings와 Prompt Override
+### Settings와 Prompt Override
 
 Settings에서 다음을 직접 조정할 수 있다.
 
@@ -481,7 +532,7 @@ prompt override 저장 위치:
 state/prompt_overrides.json
 ```
 
-## Test Prompt / Scenario
+## 테스트 프롬프트와 시나리오
 
 기능 검증용 prompt가 WebUI에 들어 있다.
 
@@ -505,20 +556,32 @@ state/prompt_overrides.json
 
 이 시나리오는 planner / architect / frontend / mobile / backend / reviewer / remember 분할과, 실행 가능한 코드 산출 흐름을 같이 검증하는 데 사용한다.
 
-## Docker
+## Docker 실행
 
 이미지:
 
 ```text
-leesk212/coding-ai-agent-v2:latest
+leesk212/coding-ai-agent-v5:latest
 ```
+
+`docker-compose.yml` 주요 환경변수:
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | *(필수)* | Primary 모델 키 |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | Local SLM fallback |
+| `LOCAL_FALLBACK_MODEL` | `qwen2.5-coder:7b` | Ollama 모델명 |
+| `MEMORY_DIR` / `STATE_DIR` | `/data/memory`, `/data/state` | 영속 디렉터리 |
+| `DEEPAGENTS_DEPLOYMENT_TOPOLOGY` | `split` | `split`/`single`/`hybrid` |
+| `ASYNC_SUBAGENT_BASE_PORT` | `30240` | SubAgent 포트 시작값 |
+| `MAX_SUBAGENTS` | `30` | 동시 SubAgent 한도 |
 
 주의:
 
 - 멀티 아키텍처 manifest가 필요하다
 - Apple Silicon에서는 `linux/arm64` 이미지가 포함되어야 한다
 
-## 현재 확인된 테스트 상태
+## 검증 방법
 
 실행 기준:
 
@@ -539,36 +602,21 @@ leesk212/coding-ai-agent-v2:latest
 
 ## 최근 주요 업데이트 요약
 
+- **Remember SubAgent 구조화 JSON 출력**: 파일별 `recommended_layer`, `rationale`, `suggested_memory_content` 제안
+- **HITL 리뷰 UI 개편**: 계층별 그룹핑, 파일별 layer/rationale/저장 노트 편집 폼, 편집 내용 그대로 영속화
+- **`_store_approved_memory_files` 재설계**: 파일마다 자기 계층 + 편집된 content로 Chroma + SQLite에 저장, `human_edited` 태그 부착
+- **동시 SubAgent 한도 확대**: `MAX_SUBAGENTS` 기본값 `3` → `30`
+- **모델 fallback 안정화**: `langchain-ollama`, `langchain-community`를 정식 dependency로 승격 (이전엔 optional이라 fallback 경로에서 `ModuleNotFoundError` 발생)
 - `split` topology 강제 및 local on-demand SubAgent spawn
 - startup key entry + background prewarm 개선
 - Main/SubAgent prompt override UI
 - planner / architect / frontend / backend / mobile / remember 역할 추가
-- remember SubAgent 기반 HITL 승인 흐름 추가
-- Memory 페이지 추가
-- durable memory record correction UI 추가
-- role ordinal 표시
-- 질의별 workdir 생성 + zip 다운로드
+- Memory 페이지 + durable memory record correction UI
+- role ordinal 표시, 질의별 workdir + zip 다운로드
 - SubAgent live output / pid / port / model 표시
-- `Focused Analysis View` / HITL 강조 UI 추가
-- navigation 상태 로그 및 chat history 복구 가드 추가
-
-## 실행
-
-### 로컬
-
-```bash
-cd /mnt/c/Users/SDS/Subject
-source .venv/bin/activate
-python -m coding_agent
-```
-
-### 테스트
-
-```bash
-.venv/bin/python -m pytest -q tests
-```
+- `Focused Analysis View` / HITL 강조 UI
 
 ## 한 줄 결론
 
 이 프로젝트는 `DeepAgents` 개념을 기반으로,  
-장기 메모리, 동적 SubAgent, mid-session Human in the Loop, 질의별 workdir, WebUI 기반 실시간 분석을 결합한 실행형 코딩 에이전트다.
+장기 메모리, 동적 SubAgent, 파일별 계층 추천 + 사람 편집이 가능한 mid-session Human in the Loop, 질의별 workdir, WebUI 기반 실시간 분석을 결합한 실행형 코딩 에이전트다.
