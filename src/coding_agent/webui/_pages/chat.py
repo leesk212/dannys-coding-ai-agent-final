@@ -328,6 +328,77 @@ def _select_remember_candidates(workdir: str | Path | None, limit: int = 10) -> 
     return [item[1] for item in scored[:limit]]
 
 
+REMEMBER_LAYERS: tuple[str, ...] = ("user/profile", "project/context", "domain/knowledge")
+REMEMBER_LAYER_ALIASES: dict[str, str] = {
+    "user/profile": "user/profile",
+    "user_profile": "user/profile",
+    "user_preferences": "user/profile",
+    "user": "user/profile",
+    "profile": "user/profile",
+    "project/context": "project/context",
+    "project_context": "project/context",
+    "project": "project/context",
+    "context": "project/context",
+    "domain/knowledge": "domain/knowledge",
+    "domain_knowledge": "domain/knowledge",
+    "domain": "domain/knowledge",
+    "knowledge": "domain/knowledge",
+}
+
+
+def _normalize_remember_layer(value: str | None, default: str = "project/context") -> str:
+    if not value:
+        return default
+    key = str(value).strip().lower().replace("\\", "/").replace(" ", "")
+    return REMEMBER_LAYER_ALIASES.get(key, default)
+
+
+def _extract_remember_json_block(text: str) -> dict | None:
+    """Extract a JSON object with a `recommendations` list from remember subagent output.
+
+    Supports ```json fenced blocks, bare ``` fenced blocks, and a loose fallback
+    that scans for the outermost `{ ... "recommendations" ... }` span.
+    """
+    if not text:
+        return None
+    fence_patterns = (
+        re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
+        re.compile(r"```\s*(\{.*?\})\s*```", re.DOTALL),
+    )
+    for pat in fence_patterns:
+        for match in pat.finditer(text):
+            payload = match.group(1)
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("recommendations"), list):
+                return obj
+    # Loose fallback: find the first "{" that contains the word "recommendations"
+    # and try to balance braces.
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        for end in range(start, len(text)):
+            ch = text[end]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    payload = text[start : end + 1]
+                    if "recommendations" in payload:
+                        try:
+                            obj = json.loads(payload)
+                            if isinstance(obj, dict) and isinstance(obj.get("recommendations"), list):
+                                return obj
+                        except json.JSONDecodeError:
+                            pass
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
 def _parse_remember_candidates_from_history(subagent_history: list[dict], workdir: str | Path | None, limit: int = 10) -> list[dict]:
     if not subagent_history:
         return []
@@ -340,8 +411,49 @@ def _parse_remember_candidates_from_history(subagent_history: list[dict], workdi
     if not remember_rows:
         return []
     text = str(remember_rows[-1].get("result_summary", "") or remember_rows[-1].get("live_output", "") or "")
+
     candidates: list[dict] = []
     seen: set[str] = set()
+
+    def _augment(rel: str, payload: dict) -> dict:
+        size = 0
+        if root is not None:
+            path = root / rel
+            if path.exists() and path.is_file():
+                try:
+                    size = path.stat().st_size
+                except Exception:
+                    size = 0
+        payload["path"] = rel
+        payload["bytes"] = size
+        payload.setdefault("source", "remember_subagent")
+        return payload
+
+    # 1) Preferred path: structured JSON block emitted by the remember subagent.
+    parsed = _extract_remember_json_block(text)
+    if parsed:
+        for item in parsed.get("recommendations", []) or []:
+            if not isinstance(item, dict):
+                continue
+            rel = str(item.get("path", "") or "").strip().lstrip("./")
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            recommended_layer = _normalize_remember_layer(item.get("recommended_layer"))
+            rationale = str(item.get("rationale", "") or "").strip() or "remember agent recommended this artifact"
+            suggested = str(item.get("suggested_memory_content", "") or "").strip()
+            candidates.append(_augment(rel, {
+                "reason": rationale,
+                "recommended_layer": recommended_layer,
+                "rationale": rationale,
+                "suggested_memory_content": suggested,
+            }))
+            if len(candidates) >= limit:
+                break
+        if candidates:
+            return candidates
+
+    # 2) Legacy fallback: line-by-line path extraction without layer guidance.
     for raw_line in text.splitlines():
         line = raw_line.strip().lstrip("-*0123456789. ").strip()
         if not line:
@@ -354,18 +466,176 @@ def _parse_remember_candidates_from_history(subagent_history: list[dict], workdi
             continue
         seen.add(rel)
         reason = line.replace(rel, "").strip(" :-") or "remember agent recommended this artifact"
-        size = 0
-        if root is not None:
-            path = root / rel
-            if path.exists() and path.is_file():
-                try:
-                    size = path.stat().st_size
-                except Exception:
-                    size = 0
-        candidates.append({"path": rel, "reason": reason, "bytes": size, "source": "remember_subagent"})
+        candidates.append(_augment(rel, {
+            "reason": reason,
+            "recommended_layer": "project/context",
+            "rationale": reason,
+            "suggested_memory_content": "",
+        }))
         if len(candidates) >= limit:
             break
     return candidates
+
+
+REMEMBER_LAYER_BADGE: dict[str, str] = {
+    "user/profile": "👤 user/profile",
+    "project/context": "🏗️ project/context",
+    "domain/knowledge": "📚 domain/knowledge",
+}
+
+REMEMBER_LAYER_GUIDE: dict[str, str] = {
+    "user/profile": (
+        "User coding style, language preferences, output format rules, conventions the user "
+        "cares about. Anything that should shape HOW we respond regardless of project."
+    ),
+    "project/context": (
+        "Project structure, architecture decisions, module boundaries, stack, dependencies, "
+        "team rules. Anything scoped to THIS project that a future turn must re-learn."
+    ),
+    "domain/knowledge": (
+        "Business rules, domain facts, API contracts, reusable technical patterns. Knowledge "
+        "that would still be valuable on another project in the same domain."
+    ),
+}
+
+
+def _render_remember_review_form(
+    candidates: list[dict],
+    workdir: str,
+    *,
+    form_key: str,
+    download_key_prefix: str,
+    default_state: dict | None = None,
+    show_reject: bool = True,
+) -> dict | None:
+    """Render the per-file layer/rationale/content review form.
+
+    Returns a dict describing the user action when a button was pressed:
+      {"action": "approve"|"reject", "selected_paths": [...], "edits": {path: {...}}}
+    Returns None while the form is still waiting for input.
+    """
+    default_state = default_state or {}
+
+    grouped: dict[str, list[dict]] = {layer: [] for layer in REMEMBER_LAYERS}
+    for row in candidates:
+        layer = _normalize_remember_layer(row.get("recommended_layer"))
+        grouped.setdefault(layer, []).append(row)
+
+    # Show the remember agent's recommendation grouped by layer (read-only summary).
+    st.markdown("##### Remember Agent Recommendations")
+    st.caption(
+        "The remember subagent grouped the nominated files by memory layer and explains why "
+        "each one belongs there. Review, edit layer/content if needed, then approve."
+    )
+    for layer in REMEMBER_LAYERS:
+        rows = grouped.get(layer) or []
+        if not rows:
+            continue
+        with st.expander(f"{REMEMBER_LAYER_BADGE[layer]}  ·  {len(rows)} file(s)", expanded=True):
+            st.caption(REMEMBER_LAYER_GUIDE[layer])
+            for row in rows:
+                rel = str(row.get("path", ""))
+                rationale = str(row.get("rationale", "") or row.get("reason", "")).strip()
+                suggested = str(row.get("suggested_memory_content", "") or "").strip()
+                st.markdown(
+                    f"**{_escape_html(rel)}**  \n"
+                    f"<span style='color:#64748b;font-size:.86em'>{_escape_html(rationale)}</span>",
+                    unsafe_allow_html=True,
+                )
+                if suggested:
+                    st.markdown(
+                        f"<div style='background:#f1f5f9;padding:.5em .75em;border-radius:6px;"
+                        f"font-size:.82em;color:#334155;margin:.25em 0 .5em 0'>"
+                        f"<b>Suggested memory note:</b><br>{_escape_html(suggested)}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                file_bytes = _read_workspace_file_bytes(workdir, rel)
+                if file_bytes:
+                    st.download_button(
+                        "Download file",
+                        data=file_bytes,
+                        file_name=Path(rel or "artifact").name,
+                        mime="application/octet-stream",
+                        key=f"{download_key_prefix}_{rel}",
+                    )
+
+    default_selection = default_state.get("selected_paths") or [
+        row["path"] for row in candidates
+    ]
+    default_edits: dict[str, dict] = default_state.get("edits") or {}
+
+    with st.form(form_key):
+        st.markdown("##### Review and Edit")
+        selected_paths = st.multiselect(
+            "Files to store in long-term memory",
+            options=[row["path"] for row in candidates],
+            default=default_selection,
+            format_func=lambda p: next(
+                (
+                    f"{REMEMBER_LAYER_BADGE[_normalize_remember_layer(row.get('recommended_layer'))]}  {row['path']}"
+                    for row in candidates if row["path"] == p
+                ),
+                p,
+            ),
+        )
+
+        edits: dict[str, dict] = {}
+        for row in candidates:
+            rel = str(row.get("path", ""))
+            recommended_layer = _normalize_remember_layer(row.get("recommended_layer"))
+            suggested = str(row.get("suggested_memory_content", "") or "").strip()
+            saved = default_edits.get(rel, {})
+            with st.expander(f"✏️ {rel}", expanded=False):
+                st.caption(
+                    f"Recommended layer: {REMEMBER_LAYER_BADGE[recommended_layer]}  ·  "
+                    f"{REMEMBER_LAYER_GUIDE[recommended_layer]}"
+                )
+                layer_value = st.selectbox(
+                    "Memory layer (override if needed)",
+                    options=list(REMEMBER_LAYERS),
+                    index=list(REMEMBER_LAYERS).index(
+                        _normalize_remember_layer(saved.get("layer", recommended_layer))
+                    ),
+                    key=f"{form_key}_layer_{rel}",
+                )
+                rationale_value = st.text_area(
+                    "Rationale (why store this)",
+                    value=str(saved.get("rationale", row.get("rationale", "") or row.get("reason", ""))),
+                    height=70,
+                    key=f"{form_key}_rationale_{rel}",
+                )
+                content_value = st.text_area(
+                    "Memory note to store (edit freely — this is what will be saved)",
+                    value=str(saved.get("content", suggested)),
+                    height=140,
+                    key=f"{form_key}_content_{rel}",
+                    help=(
+                        "Leave empty to fall back to a trimmed copy of the file contents. "
+                        "Otherwise this exact text will become the durable memory record."
+                    ),
+                )
+                edits[rel] = {
+                    "layer": layer_value,
+                    "rationale": rationale_value,
+                    "content": content_value,
+                }
+
+        if show_reject:
+            approve_col, reject_col = st.columns(2)
+            with approve_col:
+                approve = st.form_submit_button("Approve and Continue", use_container_width=True)
+            with reject_col:
+                reject = st.form_submit_button("Reject and Continue", use_container_width=True)
+        else:
+            approve = st.form_submit_button("Approve Selected for Memory", use_container_width=True)
+            reject = False
+
+    if approve:
+        return {"action": "approve", "selected_paths": list(selected_paths), "edits": edits}
+    if reject:
+        return {"action": "reject", "selected_paths": list(selected_paths), "edits": edits}
+    return None
 
 
 def _render_live_remember_review() -> None:
@@ -379,8 +649,9 @@ def _render_live_remember_review() -> None:
         "<div class='hitl-review-card'>"
         "<div class='hitl-review-title'>Action Required · Human In The Loop</div>"
         "<div class='hitl-review-text'>The remember subagent paused this turn for approval. "
-        "Review the nominated files, approve the ones that should become long-term memory, then continue the same session. "
-        "The final Main Agent answer is intentionally being held until this decision is completed.</div>"
+        "It grouped nominated files by memory layer and explained why each one matters. "
+        "Review the layer, rationale, and proposed memory note per file — edit anything you want — "
+        "then approve to persist them. The final Main Agent answer is held until this decision is made.</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -406,66 +677,39 @@ def _render_live_remember_review() -> None:
     if not candidates:
         st.warning("No remember candidates were produced.")
         return
-    for idx, row in enumerate(candidates):
-        file_cols = st.columns([6, 2])
-        with file_cols[0]:
-            st.markdown(
-                f"**{_escape_html(str(row.get('path', '')))}**  \n"
-                f"<span style='color:#64748b;font-size:.86em'>{_escape_html(str(row.get('reason', '')))}</span>",
-                unsafe_allow_html=True,
-            )
-        with file_cols[1]:
-            file_bytes = _read_workspace_file_bytes(workdir, str(row.get("path", "") or ""))
-            if file_bytes:
-                st.download_button(
-                    "Download",
-                    data=file_bytes,
-                    file_name=Path(str(row.get("path", "artifact"))).name,
-                    mime="application/octet-stream",
-                    key=f"live_remember_download_{idx}_{row.get('path', '')}",
-                    use_container_width=True,
-                )
-    default_selection = [row["path"] for row in candidates[: min(5, len(candidates))]]
-    with st.form("live_remember_review_form"):
-        selected_paths = st.multiselect(
-            "Approve files for long-term memory",
-            options=[row["path"] for row in candidates],
-            default=review.get("selected_paths", default_selection),
-            format_func=lambda p: next(
-                (
-                    f"{row['path']} · {row['reason']}"
-                    for row in candidates if row["path"] == p
-                ),
-                p,
-            ),
+
+    result = _render_remember_review_form(
+        candidates,
+        workdir,
+        form_key="live_remember_review_form",
+        download_key_prefix="live_remember_download",
+        default_state={
+            "selected_paths": review.get("selected_paths"),
+            "edits": review.get("edits"),
+        },
+        show_reject=True,
+    )
+    if result is None:
+        return
+    if result["action"] == "approve":
+        stored_ids = _store_approved_memory_files(
+            workdir,
+            result["selected_paths"],
+            edits=result["edits"],
         )
-        target_layer = st.selectbox(
-            "Memory Layer",
-            options=["project/context", "domain/knowledge", "user/profile"],
-            index=["project/context", "domain/knowledge", "user/profile"].index(
-                str(review.get("target_layer", "project/context"))
-            ),
-        )
-        approve_col, reject_col = st.columns(2)
-        with approve_col:
-            approve = st.form_submit_button("Approve and Continue", use_container_width=True)
-        with reject_col:
-            reject = st.form_submit_button("Reject and Continue", use_container_width=True)
-    if approve:
-        stored_ids = _store_approved_memory_files(workdir, selected_paths, target_layer)
         st.session_state["_human_review_resolution"] = {
             "approved": True,
-            "selected_paths": list(selected_paths),
-            "target_layer": target_layer,
+            "selected_paths": result["selected_paths"],
+            "edits": result["edits"],
             "stored_ids": stored_ids,
         }
         st.session_state.pop("_pending_human_review", None)
         st.rerun()
-    if reject:
+    else:
         st.session_state["_human_review_resolution"] = {
             "approved": False,
             "selected_paths": [],
-            "target_layer": target_layer,
+            "edits": result["edits"],
             "stored_ids": [],
         }
         st.session_state.pop("_pending_human_review", None)
@@ -481,29 +725,78 @@ def _remember_layer_to_category(layer: str) -> MemoryCategory:
     return mapping[layer]
 
 
-def _store_approved_memory_files(workdir: str, selected_paths: list[str], layer: str) -> list[str]:
+def _store_approved_memory_files(
+    workdir: str,
+    selected_paths: list[str],
+    layer: str | None = None,
+    *,
+    edits: dict[str, dict] | None = None,
+) -> list[str]:
+    """Persist approved files into long-term memory.
+
+    Each selected file is stored with its own (potentially human-edited) layer
+    and memory note. If a per-file edit is missing content, falls back to a
+    trimmed copy of the file. `layer` is a legacy single-layer default used when
+    no per-file `edits` dict is provided.
+    """
     root = Path(workdir).expanduser().resolve()
     ltm = LongTermMemoryMiddleware(memory_dir=str(settings.memory_dir))
-    category = _remember_layer_to_category(layer)
+    edits = edits or {}
     stored_ids: list[str] = []
+
     for rel_path in selected_paths[:10]:
         path = root / rel_path
-        if not path.exists() or not path.is_file():
+        per_file = edits.get(rel_path, {}) if isinstance(edits, dict) else {}
+        file_layer = _normalize_remember_layer(
+            per_file.get("layer") or layer or "project/context"
+        )
+        category = _remember_layer_to_category(file_layer)
+        rationale = str(per_file.get("rationale", "") or "").strip()
+        human_content = str(per_file.get("content", "") or "").strip()
+
+        file_text = ""
+        if path.exists() and path.is_file():
+            try:
+                file_text = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                file_text = ""
+
+        memory_body = human_content or file_text[:15000]
+        if not memory_body:
             continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        trimmed = content[:15000]
-        durable_payload = f"[remember_agent]\nfile: {rel_path}\nlayer: {layer}\n\n{trimmed}"
+
+        durable_sections = [
+            "[remember_agent]",
+            f"file: {rel_path}",
+            f"layer: {file_layer}",
+        ]
+        if rationale:
+            durable_sections.append(f"rationale: {rationale}")
+        durable_sections.extend(["", memory_body])
+        durable_payload = "\n".join(durable_sections)
+
+        tags = ["remember_agent", rel_path]
+        if human_content:
+            tags.append("human_edited")
+
         record_id = ltm._state_store.store_memory(
-            layer=layer,
+            layer=file_layer,
             content=durable_payload,
             scope_key=root.name,
             source="remember_agent_human_approved",
-            tags=["remember_agent", rel_path],
+            tags=tags,
         )
-        ltm.store.store(trimmed, category, {"source": "remember_agent_human_approved", "path": rel_path})
+        ltm.store.store(
+            memory_body,
+            category,
+            {
+                "source": "remember_agent_human_approved",
+                "path": rel_path,
+                "layer": file_layer,
+                "rationale": rationale,
+                "human_edited": "1" if human_content else "0",
+            },
+        )
         stored_ids.append(record_id)
     return stored_ids
 
@@ -2543,7 +2836,10 @@ def _stream_response(
                                 "The current user turn produced durable workspace artifacts. "
                                 "You must now launch exactly one async `remember` subagent with `start_async_task`. "
                                 "Its job is to inspect the current query workspace, nominate up to 10 files worth long-term memory, "
-                                "and explain briefly why each one matters. Do not finalize the user turn yet."
+                                "assign each file to the correct memory layer (user/profile, project/context, or domain/knowledge), "
+                                "explain WHY each file belongs in that layer, and draft a `suggested_memory_content` for each. "
+                                "It MUST emit its result as a single fenced JSON block named `recommendations` so the "
+                                "Human-in-the-Loop UI can parse it. Do not finalize the user turn yet."
                             )
                         )
                     ]
@@ -3501,51 +3797,25 @@ def render_chat() -> None:
                     else:
                         source = "remember subagent" if any(row.get("source") == "remember_subagent" for row in candidates) else "workspace heuristic fallback"
                         st.caption(f"Candidate source: {source}. Only this review path uses Human in the Loop.")
-                        for row in candidates:
-                            hist_cols = st.columns([6, 2])
-                            with hist_cols[0]:
-                                st.markdown(
-                                    f"**{_escape_html(str(row.get('path', '')))}**  \n"
-                                    f"<span style='color:#64748b;font-size:.86em'>{_escape_html(str(row.get('reason', '')))}</span>",
-                                    unsafe_allow_html=True,
-                                )
-                            with hist_cols[1]:
-                                file_bytes = _read_workspace_file_bytes(msg_workdir, str(row.get("path", "") or ""))
-                                if file_bytes:
-                                    st.download_button(
-                                        "Download",
-                                        data=file_bytes,
-                                        file_name=Path(str(row.get('path', 'artifact'))).name,
-                                        mime="application/octet-stream",
-                                        key=f"hist_remember_download_{_assistant_idx}_{row.get('path', '')}",
-                                        use_container_width=True,
-                                    )
-                        default_selection = [row["path"] for row in candidates[: min(5, len(candidates))]]
-                        with st.form(f"remember_review_form_{_assistant_idx}"):
-                            selected_paths = st.multiselect(
-                                "Approve files for long-term memory",
-                                options=[row["path"] for row in candidates],
-                                default=msg.get("remember_selected_paths", default_selection),
-                                format_func=lambda p: next(
-                                    (
-                                        f"{row['path']} · {row['reason']}"
-                                        for row in candidates if row["path"] == p
-                                    ),
-                                    p,
-                                ),
+                        result = _render_remember_review_form(
+                            candidates,
+                            msg_workdir,
+                            form_key=f"remember_review_form_{_assistant_idx}",
+                            download_key_prefix=f"hist_remember_download_{_assistant_idx}",
+                            default_state={
+                                "selected_paths": msg.get("remember_selected_paths"),
+                                "edits": msg.get("remember_edits"),
+                            },
+                            show_reject=False,
+                        )
+                        if result and result["action"] == "approve":
+                            stored_ids = _store_approved_memory_files(
+                                msg_workdir,
+                                result["selected_paths"],
+                                edits=result["edits"],
                             )
-                            target_layer = st.selectbox(
-                                "Memory Layer",
-                                options=["project/context", "domain/knowledge", "user/profile"],
-                                index=["project/context", "domain/knowledge", "user/profile"].index(
-                                    str(msg.get("remember_target_layer", "project/context"))
-                                ),
-                            )
-                            approve = st.form_submit_button("Approve Selected for Memory", use_container_width=True)
-                        if approve:
-                            stored_ids = _store_approved_memory_files(msg_workdir, selected_paths, target_layer)
-                            msg["remember_selected_paths"] = list(selected_paths)
-                            msg["remember_target_layer"] = target_layer
+                            msg["remember_selected_paths"] = result["selected_paths"]
+                            msg["remember_edits"] = result["edits"]
                             msg["remember_review_status"] = "approved"
                             msg["remember_record_ids"] = stored_ids
                             if stored_ids:
@@ -3553,9 +3823,13 @@ def render_chat() -> None:
                             else:
                                 st.warning("No files were stored. Check whether the selected files still exist.")
                         elif msg.get("remember_review_status") == "approved":
+                            layers_used = sorted({
+                                _normalize_remember_layer((msg.get("remember_edits") or {}).get(p, {}).get("layer"))
+                                for p in (msg.get("remember_selected_paths") or [])
+                            }) or ["project/context"]
                             st.success(
                                 f"Approved files stored: {len(msg.get('remember_record_ids', []) or [])} · "
-                                f"layer={msg.get('remember_target_layer', 'project/context')}"
+                                f"layers={', '.join(layers_used)}"
                             )
 
                 if msg.get("mermaid_def"):

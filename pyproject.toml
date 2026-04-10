@@ -17,6 +17,9 @@ dependencies = [
     # LLM providers — OpenAI-compatible API + native OpenRouter support
     "langchain-openai>=1.1.0",
     "langchain-openrouter>=0.0.1",
+    # Local fallback provider (Ollama) — required for model_fallback middleware
+    "langchain-ollama>=0.2.0",
+    "langchain-community>=0.3.0",
     # Memory
     "chromadb>=0.5.0",
     # WebUI
