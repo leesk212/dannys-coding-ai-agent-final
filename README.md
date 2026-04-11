@@ -134,7 +134,7 @@ docker compose up --build
 | 평가 항목 | 현재 상태 | 근거 |
 | --- | --- | --- |
 | DeepAgents(개념) 사용 여부 | 충족 | Main Agent와 SubAgent 모두 `create_deep_agent(...)` 기반으로 조립됨. AsyncSubAgent spec, middleware stack, local shell backend, checkpointer 구성을 사용 |
-| PEP8 기준에 맞추어 파이썬 코드 구현 여부 | 충족 | 모듈 분리, 타입 힌트, snake_case, import 구조, 함수 길이 분리 기준을 유지하며, `compileall`과 `pytest tests`를 통과 |
+| PEP8 기준에 맞추어 파이썬 코드 구현 여부 | 충족 | 모듈 분리, 타입 힌트, snake_case, import 구조, 함수 길이 분리 기준을 유지하며, `compileall`과 `pytest ETC/tests`를 통과 |
 | DocString Google Style 작성 여부 | 충족 | 핵심 모듈과 주요 함수 설명을 Google Style 기준으로 정리하고, 리뷰 가능한 수준으로 문서화를 유지 |
 
 ### 2. 메모리 시스템 활용 여부 (10점)
