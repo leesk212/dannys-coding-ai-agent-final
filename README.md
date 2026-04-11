@@ -77,7 +77,7 @@ https://www.youtube.com/watch?v=Cp2_yutoUuA
 ```bash
 docker pull leesk212/coding-ai-agent-v5:latest
 docker run -d \
-  --name coding-ai-agent \
+  --name dannys-coding-ai-agent \
   -p 8501:8501 \
   -e MEMORY_DIR=/data/memory \
   -e STATE_DIR=/data/state \
@@ -102,9 +102,11 @@ git clone https://github.com/leesk212/dannys-coding-ai-agent-final.git
 cd dannys-coding-ai-agent-final
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 python -m coding_agent
 ```
+
+> `.[dev]`는 실행에 필요한 런타임 의존성 + 검증용 `pytest`까지 함께 설치한다. 테스트가 필요 없으면 `pip install -e .`만 실행해도 앱 구동은 된다.
 
 브라우저:
 
